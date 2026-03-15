@@ -572,7 +572,10 @@ class ProcessingThread(QThread):
         self.finished_all.emit()
 
     def _run_simulator(self, det: TransitionDetector):
-        wps = self.source.make_default_route(n_segments=4)
+        # Берём пользовательский маршрут если задан, иначе дефолтный
+        wps = getattr(self.source, '_user_waypoints', None)
+        if not wps:
+            wps = self.source.make_default_route(n_segments=4)
         for hsv_frame, meta in self.source.fly(wps, speed_pix_per_frame=8):
             if not self._running:
                 break
@@ -647,6 +650,371 @@ class ProcessingThread(QThread):
 
 
 # ─────────────────────────────────────────────────────────────
+#  ВИДЖЕТ: РЕДАКТОР МАРШРУТА
+# ─────────────────────────────────────────────────────────────
+class RouteEditorWidget(QWidget):
+    """
+    Миниатюра карты с рисованием маршрута мышью.
+
+    Управление:
+        ЛКМ           — добавить точку маршрута
+        ПКМ           — удалить последнюю точку
+        Двойной ЛКМ   — завершить маршрут (фиксировать)
+        Колесо мыши   — зум миниатюры
+        Alt + ЛКМ     — панорамирование
+
+    Сигналы:
+        route_changed(list[Waypoint]) — маршрут изменился
+    """
+
+    route_changed = pyqtSignal(list)
+
+    # Цвета элементов маршрута
+    CLR_WP        = QColor("#4fc3f7")   # waypoint
+    CLR_WP_FIRST  = QColor("#81c784")   # стартовая точка
+    CLR_WP_LAST   = QColor("#ef5350")   # конечная точка
+    CLR_LINE      = QColor("#7986cb")   # линия маршрута
+    CLR_PREVIEW   = QColor("#ffb74d")   # линия к курсору
+    CLR_DONE      = QColor("#4db6ac")   # финальный маршрут
+
+    WP_RADIUS     = 6    # радиус кружка waypoint в экранных пикселях
+    MIN_WP_DIST   = 8    # минимальное расстояние между точками (пкс экрана)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(280, 180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setStyleSheet(
+            f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;"
+        )
+        self.setMouseTracking(True)
+
+        # Данные
+        self._map_pixmap:  QPixmap | None = None   # оригинальный снимок
+        self._map_w:       int = 1
+        self._map_h:       int = 1
+        self._waypoints:   list  = []   # [(map_x, map_y, name), ...]
+        self._route_done:  bool  = False
+        self._cursor_pos:  tuple | None = None   # позиция курсора в map-coords
+
+        # Вид (для зума/панорамы)
+        self._view_offset  = [0.0, 0.0]   # смещение в map-coords
+        self._view_scale   = 1.0           # масштаб (map_px / screen_px)
+        self._panning      = False
+        self._pan_start    = None
+
+        # Кнопки управления
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(4)
+
+        self.btn_clear   = QPushButton("Очистить")
+        self.btn_undo    = QPushButton("← Отмена")
+        self.btn_done    = QPushButton("Готово ✓")
+        self.btn_fit     = QPushButton("По экрану")
+
+        for btn in [self.btn_clear, self.btn_undo, self.btn_done, self.btn_fit]:
+            btn.setFixedHeight(22)
+            btn_layout.addWidget(btn)
+
+        self.btn_clear.clicked.connect(self._clear_route)
+        self.btn_undo.clicked.connect(self._undo_last)
+        self.btn_done.clicked.connect(self._finish_route)
+        self.btn_fit.clicked.connect(self._fit_view)
+
+        # Подсказка
+        self.lbl_hint = QLabel("ЛКМ — точка  |  ПКМ — отмена  |  2×ЛКМ — готово")
+        self.lbl_hint.setStyleSheet(f"color:{C['muted']}; font-size:9px;")
+        self.lbl_hint.setAlignment(Qt.AlignCenter)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(2, 2, 2, 2)
+        outer.setSpacing(2)
+        outer.addLayout(btn_layout)
+        self._canvas = _RouteCanvas(self)
+        outer.addWidget(self._canvas, stretch=1)
+        outer.addWidget(self.lbl_hint)
+
+    # ── Публичные методы ──────────────────────────────────────
+
+    def load_map(self, image_path: str):
+        """Загрузить изображение карты в виджет."""
+        pix = QPixmap(image_path)
+        if pix.isNull():
+            return
+        self._map_pixmap = pix
+        self._map_w      = pix.width()
+        self._map_h      = pix.height()
+        self._clear_route()
+        self._fit_view()
+        self._canvas.update()
+
+    def get_waypoints(self) -> list:
+        """
+        Вернуть список Waypoint в координатах карты.
+        Пустой список если маршрут не задан.
+        """
+        if len(self._waypoints) < 2:
+            return []
+        return [
+            Waypoint(x, y, name=f"wp_{i:02d}")
+            for i, (x, y, _) in enumerate(self._waypoints)
+        ]
+
+    def has_route(self) -> bool:
+        return len(self._waypoints) >= 2
+
+    # ── Слоты кнопок ─────────────────────────────────────────
+
+    def _clear_route(self):
+        self._waypoints  = []
+        self._route_done = False
+        self.lbl_hint.setText("ЛКМ — точка  |  ПКМ — отмена  |  2×ЛКМ — готово")
+        self._canvas.update()
+        self.route_changed.emit([])
+
+    def _undo_last(self):
+        if self._waypoints:
+            self._waypoints.pop()
+            self._route_done = False
+            self._canvas.update()
+            self.route_changed.emit(self.get_waypoints())
+
+    def _finish_route(self):
+        if len(self._waypoints) >= 2:
+            self._route_done = True
+            n = len(self._waypoints)
+            self.lbl_hint.setText(
+                f"Маршрут задан: {n} точек  |  нажмите Старт"
+            )
+            self._canvas.update()
+            self.route_changed.emit(self.get_waypoints())
+
+    def _fit_view(self):
+        """Подогнать масштаб чтобы вся карта влезла в виджет."""
+        if self._map_pixmap is None:
+            return
+        cw = self._canvas.width()
+        ch = self._canvas.height()
+        if cw < 1 or ch < 1:
+            return
+        sx = self._map_w / cw
+        sy = self._map_h / ch
+        self._view_scale  = max(sx, sy)
+        self._view_offset = [0.0, 0.0]
+        self._canvas.update()
+
+    # ── Преобразования координат ──────────────────────────────
+
+    def _screen_to_map(self, sx: float, sy: float) -> tuple:
+        """Экранные координаты (canvas) → координаты карты."""
+        mx = self._view_offset[0] + sx * self._view_scale
+        my = self._view_offset[1] + sy * self._view_scale
+        return mx, my
+
+    def _map_to_screen(self, mx: float, my: float) -> tuple:
+        """Координаты карты → экранные координаты (canvas)."""
+        sx = (mx - self._view_offset[0]) / self._view_scale
+        sy = (my - self._view_offset[1]) / self._view_scale
+        return sx, sy
+
+    # ── Обработка событий мыши (делегируем в canvas) ─────────
+
+    def _mouse_press(self, event):
+        if self._map_pixmap is None:
+            return
+
+        if event.button() == Qt.MiddleButton or (
+            event.button() == Qt.LeftButton and
+            event.modifiers() & Qt.AltModifier
+        ):
+            self._panning   = True
+            self._pan_start = (event.x(), event.y())
+            return
+
+        mx, my = self._screen_to_map(event.x(), event.y())
+
+        if event.button() == Qt.RightButton:
+            self._undo_last()
+            return
+
+        if event.button() == Qt.LeftButton and not self._route_done:
+            # Проверяем минимальное расстояние до последней точки
+            if self._waypoints:
+                lx, ly, _ = self._waypoints[-1]
+                lsx, lsy  = self._map_to_screen(lx, ly)
+                dist = ((event.x() - lsx) ** 2 + (event.y() - lsy) ** 2) ** 0.5
+                if dist < self.MIN_WP_DIST:
+                    return
+            name = f"wp_{len(self._waypoints):02d}"
+            self._waypoints.append((mx, my, name))
+            self._canvas.update()
+            self.route_changed.emit(self.get_waypoints())
+
+    def _mouse_release(self, event):
+        if self._panning:
+            self._panning   = False
+            self._pan_start = None
+
+    def _mouse_move(self, event):
+        mx, my = self._screen_to_map(event.x(), event.y())
+        self._cursor_pos = (mx, my)
+
+        if self._panning and self._pan_start:
+            dx = (event.x() - self._pan_start[0]) * self._view_scale
+            dy = (event.y() - self._pan_start[1]) * self._view_scale
+            self._view_offset[0] -= dx
+            self._view_offset[1] -= dy
+            # Ограничиваем смещение
+            self._view_offset[0] = max(0, min(self._view_offset[0],
+                                              self._map_w - self._canvas.width() * self._view_scale))
+            self._view_offset[1] = max(0, min(self._view_offset[1],
+                                              self._map_h - self._canvas.height() * self._view_scale))
+            self._pan_start = (event.x(), event.y())
+
+        self._canvas.update()
+
+    def _mouse_double_click(self, event):
+        if event.button() == Qt.LeftButton:
+            self._finish_route()
+
+    def _wheel(self, event):
+        if self._map_pixmap is None:
+            return
+        factor = 0.85 if event.angleDelta().y() > 0 else 1.18
+        new_scale = self._view_scale * factor
+
+        # Ограничиваем зум
+        min_scale = min(self._map_w / max(self._canvas.width(), 1),
+                        self._map_h / max(self._canvas.height(), 1))
+        new_scale = max(min_scale * 0.5, min(new_scale, float(max(self._map_w, self._map_h))))
+
+        # Зум вокруг курсора
+        cx, cy = self._screen_to_map(event.x(), event.y())
+        self._view_scale    = new_scale
+        self._view_offset[0] = cx - event.x() * new_scale
+        self._view_offset[1] = cy - event.y() * new_scale
+        self._canvas.update()
+
+    def _paint_canvas(self, painter: QPainter, w: int, h: int):
+        """Отрисовка содержимого canvas."""
+        painter.fillRect(0, 0, w, h, QColor(C['widget']))
+
+        if self._map_pixmap is None:
+            painter.setPen(QColor(C['muted']))
+            painter.setFont(QFont("Consolas", 9))
+            painter.drawText(
+                0, 0, w, h, Qt.AlignCenter,
+                "Загрузите карту\n(кнопка  🗺  Загрузить карту)"
+            )
+            return
+
+        # ── Рисуем миниатюру карты ────────────────────────────
+        vis_w = int(w * self._view_scale)
+        vis_h = int(h * self._view_scale)
+        ox    = int(self._view_offset[0])
+        oy    = int(self._view_offset[1])
+
+        src_rect  = (ox, oy, min(vis_w, self._map_w - ox),
+                              min(vis_h, self._map_h - oy))
+        dest_rect = (0, 0, w, h)
+
+        # Вырезаем нужный кусок карты и масштабируем
+        cropped = self._map_pixmap.copy(ox, oy, src_rect[2], src_rect[3])
+        scaled  = cropped.scaled(w, h, Qt.IgnoreAspectRatio,
+                                  Qt.SmoothTransformation)
+        painter.drawPixmap(0, 0, scaled)
+
+        # ── Тёмный оверлей для читаемости ─────────────────────
+        painter.fillRect(0, 0, w, h, QColor(0, 0, 0, 60))
+
+        # ── Линии маршрута ────────────────────────────────────
+        if len(self._waypoints) >= 2:
+            color = self.CLR_DONE if self._route_done else self.CLR_LINE
+            pen   = QPen(color, 2)
+            painter.setPen(pen)
+            for i in range(len(self._waypoints) - 1):
+                x0, y0, _ = self._waypoints[i]
+                x1, y1, _ = self._waypoints[i + 1]
+                sx0, sy0  = self._map_to_screen(x0, y0)
+                sx1, sy1  = self._map_to_screen(x1, y1)
+                painter.drawLine(int(sx0), int(sy0), int(sx1), int(sy1))
+
+        # ── Линия предпросмотра к курсору ─────────────────────
+        if (self._waypoints and not self._route_done
+                and self._cursor_pos):
+            lx, ly, _ = self._waypoints[-1]
+            sx0, sy0  = self._map_to_screen(lx, ly)
+            sx1, sy1  = self._map_to_screen(*self._cursor_pos)
+            pen = QPen(self.CLR_PREVIEW, 1, Qt.DashLine)
+            pen.setDashPattern([4, 3])
+            painter.setPen(pen)
+            painter.drawLine(int(sx0), int(sy0), int(sx1), int(sy1))
+
+        # ── Точки маршрута ────────────────────────────────────
+        for i, (mx, my, name) in enumerate(self._waypoints):
+            sx, sy = self._map_to_screen(mx, my)
+            sx, sy = int(sx), int(sy)
+
+            if i == 0:
+                color = self.CLR_WP_FIRST
+            elif i == len(self._waypoints) - 1:
+                color = self.CLR_WP_LAST
+            else:
+                color = self.CLR_WP
+
+            painter.setBrush(QBrush(color))
+            painter.setPen(QPen(QColor("white"), 1.5))
+            painter.drawEllipse(sx - self.WP_RADIUS, sy - self.WP_RADIUS,
+                                self.WP_RADIUS * 2, self.WP_RADIUS * 2)
+
+            # Номер точки
+            painter.setPen(QColor("white"))
+            painter.setFont(QFont("Consolas", 7, QFont.Bold))
+            painter.drawText(sx + self.WP_RADIUS + 2, sy + 4, str(i))
+
+        # ── Информация ────────────────────────────────────────
+        painter.setPen(QColor(C['muted']))
+        painter.setFont(QFont("Consolas", 8))
+        info = f"карта {self._map_w}×{self._map_h}  |  точек: {len(self._waypoints)}"
+        painter.drawText(4, h - 4, info)
+
+        # ── Координаты курсора ────────────────────────────────
+        if self._cursor_pos:
+            cx, cy = self._cursor_pos
+            cx = max(0, min(cx, self._map_w))
+            cy = max(0, min(cy, self._map_h))
+            painter.setPen(QColor(C['signal']))
+            painter.drawText(w - 120, h - 4, f"x={cx:.0f} y={cy:.0f}")
+
+
+class _RouteCanvas(QWidget):
+    """Внутренний холст — делегирует все события в RouteEditorWidget."""
+
+    def __init__(self, editor: RouteEditorWidget):
+        super().__init__(editor)
+        self._editor = editor
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setRenderHint(QPainter.Antialiasing)
+        self._editor._paint_canvas(painter, self.width(), self.height())
+
+    def mousePressEvent(self, e):      self._editor._mouse_press(e)
+    def mouseReleaseEvent(self, e):    self._editor._mouse_release(e)
+    def mouseMoveEvent(self, e):       self._editor._mouse_move(e)
+    def mouseDoubleClickEvent(self, e): self._editor._mouse_double_click(e)
+    def wheelEvent(self, e):           self._editor._wheel(e)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._editor._fit_view()
+
+
+# ─────────────────────────────────────────────────────────────
 #  ПАНЕЛЬ ПАРАМЕТРОВ ДЕТЕКТОРА
 # ─────────────────────────────────────────────────────────────
 class ParamPanel(QWidget):
@@ -698,8 +1066,8 @@ class VisualizerWindow(QMainWindow):
     def __init__(self, args=None):
         super().__init__()
         self.setWindowTitle("Детектор переходов — визуализатор")
-        self.setMinimumSize(1100, 680)
-        self.resize(1300, 780)
+        self.setMinimumSize(1200, 720)
+        self.resize(1440, 860)
         self.setStyleSheet(STYLESHEET)
 
         self._thread:     ProcessingThread | None = None
@@ -773,6 +1141,15 @@ class VisualizerWindow(QMainWindow):
         vgl.addWidget(self.frame_widget)
         left.addWidget(vg)
 
+        # Редактор маршрута
+        rg = QGroupBox("МАРШРУТ  (ЛКМ=точка  ПКМ=отмена  2×ЛКМ=готово)")
+        rgl = QVBoxLayout(rg)
+        rgl.setContentsMargins(4, 4, 4, 4)
+        self.route_editor = RouteEditorWidget()
+        self.route_editor.setMinimumHeight(200)
+        rgl.addWidget(self.route_editor)
+        left.addWidget(rg)
+
         # Параметры
         self.param_panel = ParamPanel()
         left.addWidget(self.param_panel)
@@ -790,7 +1167,7 @@ class VisualizerWindow(QMainWindow):
 
         lw = QWidget()
         lw.setLayout(left)
-        lw.setFixedWidth(345)
+        lw.setFixedWidth(380)
         root.addWidget(lw)
 
         # ── Правая колонка: графики ────────────────────────────
@@ -896,10 +1273,14 @@ class VisualizerWindow(QMainWindow):
             self.lbl_status.setText(str(e))
             return
 
+        # Загружаем миниатюру карты в редактор маршрута
+        self.route_editor.load_map(path)
+        self._map_path = path
+
         self.traj_widget.set_map_size(self._sim.map_w, self._sim.map_h)
         self.setWindowTitle(title or f"Детектор — {os.path.basename(path)}")
         self.lbl_status.setText(
-            f"Карта: {self._sim.map_w}×{self._sim.map_h}  |  готов к запуску"
+            f"Карта: {self._sim.map_w}×{self._sim.map_h}  |  нарисуйте маршрут и нажмите Старт"
         )
 
     def _start_from_frames(self, folder: str):
@@ -932,6 +1313,15 @@ class VisualizerWindow(QMainWindow):
         params = self.param_panel.get_params()
 
         if self._sim:
+            # Берём маршрут из редактора или дефолтный
+            wps = self.route_editor.get_waypoints()
+            if not wps:
+                wps = self._sim.make_default_route(n_segments=3)
+                self.lbl_status.setText(
+                    "Маршрут не задан — используется автоматический"
+                )
+            # Передаём waypoints в симулятор через атрибут
+            self._sim._user_waypoints = wps
             source = self._sim
         elif hasattr(self, "_frame_paths"):
             source = self._frame_paths
