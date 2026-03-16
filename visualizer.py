@@ -357,66 +357,161 @@ class SignalPlot(QWidget):
 #  ВИДЖЕТ: ГИСТОГРАММА H
 # ─────────────────────────────────────────────────────────────
 class HistWidget(QWidget):
-    """Гистограмма канала H (16 бинов) с цветовой раскраской."""
+    """
+    Гистограмма канала H (16 бинов).
+
+    Цвет столбика = оттенок H который этот бин представляет
+                    (визуальная подсказка, не аналитика)
+    Высота столбика = доля пикселей кадра с этим оттенком
+    Ось X = оттенок H: 0°=красный, 30°=оранжевый, 60°=жёлтый,
+                       90°=жёлто-зелёный, 120°=зелёный, 150°=голубой
+    """
 
     def __init__(self, title="Гистограмма H", parent=None):
         super().__init__(parent)
-        self._title = title
-        self._bins  = np.zeros(16, dtype=np.float32)
-        self.setMinimumSize(120, 80)
+        self._title      = title
+        self._bins       = np.zeros(16, dtype=np.float32)
+        self._confidence = 0.0   # s_confidence: доверие к H [0,1]
+        self._bhat_val   = None
+        self._pair: "HistWidget | None" = None
+        self.setMinimumSize(120, 90)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(
-            f"background: {C['widget']}; border:1px solid {C['border']}; border-radius:4px;"
+            f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;"
         )
 
-    def set_histogram(self, bins: np.ndarray):
+    def set_histogram(self, bins: np.ndarray, confidence: float = None):
         self._bins = bins.copy()
+        if confidence is not None:
+            self._confidence = confidence
         self.update()
+
+    def set_confidence(self, confidence: float):
+        self._confidence = confidence
+        self.update()
+
+    def set_pair(self, other: "HistWidget"):
+        """Связать с парным виджетом для показа Бхаттачарьи."""
+        self._pair = other
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        pad  = (4, 18, 4, 14)
+
+        # Отступы: сверху — заголовок, снизу — ось X с метками
+        pad_top  = 28
+        pad_bot  = 22
+        pad_left = 4
+        pad_right = 4
 
         painter.fillRect(0, 0, w, h, QColor(C['widget']))
 
-        # Заголовок
+        # ── Полоска доверия к H (насыщенность S) ─────────────
+        # Серая зона = H ненадёжен, цветная = H информативен
+        conf_w = int((w - pad_left - pad_right) * min(self._confidence, 1.0))
+        painter.fillRect(pad_left, 14, w - pad_left - pad_right, 4,
+                         QColor(C['border']))
+        if conf_w > 0:
+            # Цвет: красный (низкое доверие) → зелёный (высокое)
+            r = int(200 * (1.0 - self._confidence))
+            g = int(180 * self._confidence)
+            painter.fillRect(pad_left, 14, conf_w, 4, QColor(r, g, 60))
+        painter.setPen(QColor(C['muted']))
+        painter.setFont(QFont("Consolas", 7))
+        painter.drawText(w - 60, 19, f"S={self._confidence:.2f}")
+
+        # ── Заголовок ─────────────────────────────────────────
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 8))
-        painter.drawText(pad[0], 11, self._title)
+        painter.drawText(pad_left, 11, self._title)
 
-        pw = w - pad[0] - pad[2]
-        ph = h - pad[1] - pad[3]
+        # ── Бхаттачарья с парным виджетом ─────────────────────
+        if self._pair is not None and np.any(self._bins) and np.any(self._pair._bins):
+            import cv2 as _cv2
+            b = float(_cv2.compareHist(
+                self._bins.astype(np.float32),
+                self._pair._bins.astype(np.float32),
+                _cv2.HISTCMP_BHATTACHARYYA
+            ))
+            # Цвет: зелёный (похожи) → красный (различны)
+            if b < 0.2:
+                bc = QColor(C['old_zone'])
+            elif b < 0.4:
+                bc = QColor(C['threshold'])
+            else:
+                bc = QColor(C['event'])
+            painter.setPen(bc)
+            painter.setFont(QFont("Consolas", 8, QFont.Bold))
+            painter.drawText(w - 80, 11, f"Δ={b:.3f}")
+
+        pw = w - pad_left - pad_right
+        ph = h - pad_top - pad_bot
         n  = len(self._bins)
 
         if not np.any(self._bins):
             painter.setPen(QColor(C['muted']))
-            painter.drawText(pad[0], pad[1] + ph // 2 + 4, "нет данных")
+            painter.setFont(QFont("Consolas", 8))
+            painter.drawText(pad_left, pad_top + ph // 2 + 4,
+                             "буфер заполняется...")
             return
 
-        max_val    = float(self._bins.max()) or 1.0
-        bar_w      = pw / n
-        hue_step   = 180.0 / n    # H в OpenCV: 0-180
+        max_val  = float(self._bins.max()) or 1.0
+        bar_w    = pw / n
+        hue_step = 180.0 / n
 
         for i, val in enumerate(self._bins):
-            bh = int((val / max_val) * ph)
-            bx = pad[0] + int(i * bar_w)
-            by = pad[1] + ph - bh
+            bh  = int((val / max_val) * ph)
+            bx  = pad_left + int(i * bar_w)
+            by  = pad_top + ph - bh
 
-            # Цвет бара соответствует оттенку H
-            hue_qt = int(i * hue_step * 2)   # Qt H: 0-360
-            color  = QColor.fromHsv(hue_qt, 200, 220)
+            # Цвет бара = оттенок H который он представляет
+            hue_qt = int(i * hue_step * 2)
+            sat    = 200
+            # Затемняем бары с низким значением
+            vib    = max(80, int(220 * (val / max_val)))
+            color  = QColor.fromHsv(hue_qt, sat, vib)
             painter.fillRect(bx, by, max(int(bar_w) - 1, 1), bh, color)
 
-        # Ось X
-        painter.setPen(QColor(C['border']))
-        painter.drawLine(pad[0], pad[1] + ph, w - pad[2], pad[1] + ph)
+            # Если есть парный виджет — показываем расхождение
+            if self._pair is not None and np.any(self._pair._bins):
+                pair_val  = float(self._pair._bins[i])
+                pair_h    = int((pair_val / max_val) * ph)
+                diff      = abs(bh - pair_h)
+                if diff > 3:
+                    # Полупрозрачная красная зона расхождения
+                    painter.fillRect(
+                        bx, min(by, pad_top + ph - pair_h),
+                        max(int(bar_w) - 1, 1), diff,
+                        QColor(239, 83, 80, 60)
+                    )
+
+        # ── Базовая линия ────────────────────────────────────
+        painter.setPen(QPen(QColor(C['border']), 0.5))
+        painter.drawLine(pad_left, pad_top + ph,
+                         w - pad_right, pad_top + ph)
+
+        # ── Ось X с метками оттенков ──────────────────────────
+        painter.setFont(QFont("Consolas", 7))
+        labels = {
+            0:  "0°\nкрасн",
+            4:  "45°\nорanj",
+            8:  "90°\nжёлт",
+            11: "120°\nзел",
+            14: "150°\nгол",
+        }
+        for bin_i, lbl in labels.items():
+            lx = pad_left + int(bin_i * bar_w) + int(bar_w / 2)
+            line1, line2 = lbl.split("\n")
+            painter.setPen(QColor(C['muted']))
+            painter.drawText(lx - 10, h - pad_bot + 10, line1)
+            painter.drawText(lx - 10, h - pad_bot + 19, line2)
+
+        # ── Метка "старая" / "новая" ──────────────────────────
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 7))
-        painter.drawText(pad[0], h - 2, "0°")
-        painter.drawText(w // 2 - 8, h - 2, "90°")
-        painter.drawText(w - pad[2] - 20, h - 2, "180°")
+        role = "← первая половина буфера" if "стар" in self._title else "← вторая половина буфера"
+        painter.drawText(pad_left, pad_top - 2, role)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -809,6 +904,29 @@ class ProcessingThread(QThread):
                         mat[jj, ii] = d
                 buf_matrix = mat
 
+            # Живые гистограммы — средние по половинам буфера
+            live_old_hist = None
+            live_new_hist = None
+            live_old_conf = 0.0
+            live_new_conf = 0.0
+            if det._buffer.is_full():
+                old_s = det._buffer.get_first_half()
+                new_s = det._buffer.get_last_half()
+                if old_s:
+                    live_old_hist = np.mean(
+                        [s.histogram() for s in old_s], axis=0
+                    ).astype(np.float32)
+                    live_old_conf = float(np.mean(
+                        [s._features["s_confidence"] for s in old_s]
+                    ))
+                if new_s:
+                    live_new_hist = np.mean(
+                        [s.histogram() for s in new_s], axis=0
+                    ).astype(np.float32)
+                    live_new_conf = float(np.mean(
+                        [s._features["s_confidence"] for s in new_s]
+                    ))
+
             info = {
                 "frame_number":  meta.frame_number,
                 "bhat":          bhat,
@@ -820,8 +938,10 @@ class ProcessingThread(QThread):
                 "map_w":         self.source.map_w,
                 "map_h":         self.source.map_h,
                 "is_event":      ev is not None,
-                "old_hist":      ev.old_state.histogram() if ev and ev.old_state else None,
-                "new_hist":      ev.new_state.histogram() if ev and ev.new_state else None,
+                "old_hist":      ev.old_state.histogram() if ev and ev.old_state else live_old_hist,
+                "new_hist":      ev.new_state.histogram() if ev and ev.new_state else live_new_hist,
+                "old_conf":      live_old_conf,
+                "new_conf":      live_new_conf,
                 "buf_matrix":    buf_matrix,
                 "buf_m":         buf_m,
             }
@@ -859,6 +979,21 @@ class ProcessingThread(QThread):
                         mat[jj, ii] = d
                 buf_matrix = mat
 
+            # Живые гистограммы
+            live_old_hist = None
+            live_new_hist = None
+            if det._buffer.is_full():
+                old_s = det._buffer.get_first_half()
+                new_s = det._buffer.get_last_half()
+                if old_s:
+                    live_old_hist = np.mean(
+                        [s.histogram() for s in old_s], axis=0
+                    ).astype(np.float32)
+                if new_s:
+                    live_new_hist = np.mean(
+                        [s.histogram() for s in new_s], axis=0
+                    ).astype(np.float32)
+
             info = {
                 "frame_number":  i,
                 "bhat":          det.signal_history[-1]    if n else 0.0,
@@ -870,8 +1005,8 @@ class ProcessingThread(QThread):
                 "map_w":         len(self.source),
                 "map_h":         1,
                 "is_event":      ev is not None,
-                "old_hist":      ev.old_state.histogram() if ev and ev.old_state else None,
-                "new_hist":      ev.new_state.histogram() if ev and ev.new_state else None,
+                "old_hist":      ev.old_state.histogram() if ev and ev.old_state else live_old_hist,
+                "new_hist":      ev.new_state.histogram() if ev and ev.new_state else live_new_hist,
                 "buf_matrix":    buf_matrix,
                 "buf_m":         buf_m,
             }
@@ -1428,16 +1563,20 @@ class VisualizerWindow(QMainWindow):
         hog = QGroupBox("ГИСТОГРАММА H — старая зона")
         hogl = QVBoxLayout(hog)
         hogl.setContentsMargins(4, 4, 4, 4)
-        self.hist_old = HistWidget("старая зона")
+        self.hist_old = HistWidget("H — старая зона (1-я половина буфера)")
         hogl.addWidget(self.hist_old)
         hrow.addWidget(hog)
 
         hng = QGroupBox("ГИСТОГРАММА H — новая зона")
         hngl = QVBoxLayout(hng)
         hngl.setContentsMargins(4, 4, 4, 4)
-        self.hist_new = HistWidget("новая зона")
+        self.hist_new = HistWidget("H — новая зона (2-я половина буфера)")
         hngl.addWidget(self.hist_new)
         hrow.addWidget(hng)
+
+        # Связываем гистограммы — каждая видит другую для расчёта Δ
+        self.hist_old.set_pair(self.hist_new)
+        self.hist_new.set_pair(self.hist_old)
 
         hw = QWidget()
         hw.setLayout(hrow)
@@ -1672,11 +1811,13 @@ class VisualizerWindow(QMainWindow):
                 info["in_transition"]
             )
 
-        # Гистограммы при переходе
+        # Гистограммы — обновляем каждый кадр
         if info["old_hist"] is not None:
-            self.hist_old.set_histogram(info["old_hist"])
+            self.hist_old.set_histogram(info["old_hist"],
+                                        info.get("old_conf", 0.0))
         if info["new_hist"] is not None:
-            self.hist_new.set_histogram(info["new_hist"])
+            self.hist_new.set_histogram(info["new_hist"],
+                                        info.get("new_conf", 0.0))
 
         # Статусбар
         self.lbl_frame.setText(f"кадр: {fn:6d}")
