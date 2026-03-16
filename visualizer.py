@@ -521,6 +521,209 @@ class TrajectoryWidget(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────
+#  ВИДЖЕТ: МАТРИЦА РАССТОЯНИЙ БУФЕРА
+# ─────────────────────────────────────────────────────────────
+class DistanceMatrixWidget(QWidget):
+    """
+    Квадратная тепловая карта N×N — расстояния Бхаттачарьи
+    между каждой парой кадров в буфере.
+
+    Что читать на матрице
+    ─────────────────────
+    Однородная синяя матрица
+        Все кадры в буфере похожи → буфер стабилен → переходов нет.
+
+    Два синих блока по диагонали + яркая крестовина между ними
+        В буфере есть переход: старые кадры похожи между собой,
+        новые похожи между собой, но старые ≠ новые.
+        Именно это состояние должно давать высокий LR и Бхаттачарью.
+
+    Хаотичная матрица без блочной структуры
+        Буфер содержит шум или быстро меняющуюся сцену.
+        Ложное срабатывание — LR высокий но блоков нет.
+
+    Красная диагональная полоса (не блок)
+        Плавный градиентный переход — освещение меняется постепенно.
+
+    Белая вертикальная/горизонтальная линия
+        Один аномальный кадр (засветка, тень) — не настоящий переход.
+
+    Цветовая шкала: синий=0 (идентичны) → красный=1 (максимально различны)
+    """
+
+    # Цветовая карта: синий → голубой → зелёный → жёлтый → красный
+    _COLORMAP = [
+        (0.00, ( 20,  60, 180)),   # тёмно-синий
+        (0.20, ( 40, 140, 220)),   # голубой
+        (0.40, ( 30, 190, 160)),   # циан-зелёный
+        (0.60, (200, 210,  40)),   # жёлто-зелёный
+        (0.80, (240, 120,  20)),   # оранжевый
+        (1.00, (220,  30,  30)),   # красный
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(200, 200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setStyleSheet(
+            f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;"
+        )
+
+        # Последняя матрица N×N расстояний Бхаттачарьи
+        self._matrix:     np.ndarray | None = None
+        self._n:          int  = 0
+        self._m:          int  = 0     # текущий M (граница старое/новое)
+        self._is_trigger: bool = False
+
+        # Кэш QImage чтобы не перерисовывать каждый раз
+        self._img_cache:  QImage | None = None
+        self._cache_n:    int = -1
+
+    # ── Публичный интерфейс ───────────────────────────────────
+
+    def update_matrix(self, matrix: np.ndarray, m: int, is_trigger: bool):
+        """
+        Принять новую матрицу расстояний.
+
+        Параметры
+        ----------
+        matrix     : np.ndarray  shape (N, N), dtype float32, значения [0,1]
+        m          : int          текущий M — граница старое/новое в буфере
+        is_trigger : bool         детектор сейчас в состоянии перехода
+        """
+        self._matrix     = matrix
+        self._n          = matrix.shape[0]
+        self._m          = m
+        self._is_trigger = is_trigger
+
+        # Инвалидируем кэш только если размер изменился
+        if self._n != self._cache_n:
+            self._img_cache = None
+            self._cache_n   = self._n
+
+        self.update()
+
+    def clear(self):
+        self._matrix     = None
+        self._n          = 0
+        self._img_cache  = None
+        self.update()
+
+    # ── Отрисовка ─────────────────────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        painter.fillRect(0, 0, w, h, QColor(C['widget']))
+
+        if self._matrix is None or self._n < 2:
+            painter.setPen(QColor(C['muted']))
+            painter.setFont(QFont("Consolas", 9))
+            painter.drawText(self.rect(), Qt.AlignCenter,
+                             "Нет данных\nбуфер заполняется...")
+            return
+
+        pad_top   = 14
+        pad_right = 52   # место для шкалы
+        pad_bot   = 14
+        pad_left  = 14
+
+        cell_w = (w - pad_left - pad_right) / self._n
+        cell_h = (h - pad_top  - pad_bot)   / self._n
+
+        # ── Рисуем ячейки ─────────────────────────────────────
+        for i in range(self._n):
+            for j in range(self._n):
+                val   = float(self._matrix[i, j])
+                color = self._val_to_color(val)
+                x = pad_left + j * cell_w
+                y = pad_top  + i * cell_h
+                painter.fillRect(
+                    int(x), int(y),
+                    max(int(cell_w), 1), max(int(cell_h), 1),
+                    color
+                )
+
+        # ── Линия границы M (старое/новое) ────────────────────
+        split = self._n - self._m
+        if 0 < split < self._n:
+            lx = pad_left + split * cell_w
+            ly = pad_top  + split * cell_h
+            mx_end = pad_left + self._n * cell_w
+            my_end = pad_top  + self._n * cell_h
+
+            pen = QPen(QColor("white"), 1.5, Qt.DashLine)
+            pen.setDashPattern([3, 2])
+            painter.setPen(pen)
+            # Вертикальная линия
+            painter.drawLine(int(lx), pad_top, int(lx), int(my_end))
+            # Горизонтальная линия
+            painter.drawLine(pad_left, int(ly), int(mx_end), int(ly))
+
+            # Метки
+            painter.setFont(QFont("Consolas", 7))
+            painter.setPen(QColor("white"))
+            painter.drawText(int(lx) + 2, pad_top + 9, f"M={self._m}")
+
+        # ── Рамка матрицы ─────────────────────────────────────
+        mat_w = int(self._n * cell_w)
+        mat_h = int(self._n * cell_h)
+        border_color = QColor(C['event']) if self._is_trigger else QColor(C['border'])
+        painter.setPen(QPen(border_color, 1.5 if self._is_trigger else 0.5))
+        painter.drawRect(pad_left, pad_top, mat_w, mat_h)
+
+        # ── Шкала цветов (правый край) ────────────────────────
+        sc_x  = w - pad_right + 6
+        sc_y  = pad_top
+        sc_h  = mat_h
+        sc_w  = 10
+
+        steps = 64
+        for si in range(steps):
+            frac  = si / (steps - 1)
+            color = self._val_to_color(frac)
+            sy    = sc_y + int(frac * sc_h)
+            painter.fillRect(sc_x, sy, sc_w,
+                             max(int(sc_h / steps) + 1, 1), color)
+
+        # Метки шкалы
+        painter.setPen(QColor(C['muted']))
+        painter.setFont(QFont("Consolas", 7))
+        painter.drawText(sc_x + sc_w + 2, sc_y + 6,        "1.0")
+        painter.drawText(sc_x + sc_w + 2, sc_y + sc_h // 2, "0.5")
+        painter.drawText(sc_x + sc_w + 2, sc_y + sc_h - 2,  "0.0")
+
+        # ── Подпись состояния ─────────────────────────────────
+        painter.setFont(QFont("Consolas", 8, QFont.Bold))
+        if self._is_trigger:
+            painter.setPen(QColor(C['event']))
+            painter.drawText(pad_left + 2, pad_top - 2, "ПЕРЕХОД")
+        else:
+            painter.setPen(QColor(C['muted']))
+            painter.drawText(pad_left + 2, pad_top - 2,
+                             f"N={self._n}  M={self._m}")
+
+    # ── Вспомогательные ───────────────────────────────────────
+
+    def _val_to_color(self, val: float) -> QColor:
+        """Интерполировать значение [0,1] в цвет по colormap."""
+        val = max(0.0, min(1.0, val))
+        cm  = self._COLORMAP
+        for k in range(len(cm) - 1):
+            t0, c0 = cm[k]
+            t1, c1 = cm[k + 1]
+            if t0 <= val <= t1:
+                frac = (val - t0) / (t1 - t0)
+                r = int(c0[0] + frac * (c1[0] - c0[0]))
+                g = int(c0[1] + frac * (c1[1] - c0[1]))
+                b = int(c0[2] + frac * (c1[2] - c0[2]))
+                return QColor(r, g, b)
+        return QColor(*cm[-1][1])
+
+
+# ─────────────────────────────────────────────────────────────
 #  СПИСОК СОБЫТИЙ
 # ─────────────────────────────────────────────────────────────
 class EventListWidget(QListWidget):
@@ -590,6 +793,22 @@ class ProcessingThread(QThread):
             lr   = det.lr_history[-1]       if n else 1.0
             thr  = det.threshold_history[-1] if n else 0.3
 
+            # Матрица расстояний буфера (каждые 3 кадра для производительности)
+            buf_matrix = None
+            buf_m      = 0
+            if meta.frame_number % 3 == 0 and det._buffer.is_full():
+                import cv2 as _cv2
+                states = det._buffer.get_window()
+                buf_m  = det._buffer.dynamic_m(min_m=det.min_m)
+                n_s    = len(states)
+                mat    = np.zeros((n_s, n_s), dtype=np.float32)
+                for ii in range(n_s):
+                    for jj in range(ii + 1, n_s):
+                        d = states[ii].bhattacharyya_distance(states[jj])
+                        mat[ii, jj] = d
+                        mat[jj, ii] = d
+                buf_matrix = mat
+
             info = {
                 "frame_number":  meta.frame_number,
                 "bhat":          bhat,
@@ -603,6 +822,8 @@ class ProcessingThread(QThread):
                 "is_event":      ev is not None,
                 "old_hist":      ev.old_state.histogram() if ev and ev.old_state else None,
                 "new_hist":      ev.new_state.histogram() if ev and ev.new_state else None,
+                "buf_matrix":    buf_matrix,
+                "buf_m":         buf_m,
             }
             self.frame_ready.emit(bgr, info)
             if ev:
@@ -623,6 +844,21 @@ class ProcessingThread(QThread):
             ev  = det.process_frame(hsv, i)
 
             n   = len(det.signal_history)
+            # Матрица расстояний
+            buf_matrix = None
+            buf_m      = 0
+            if i % 3 == 0 and det._buffer.is_full():
+                states = det._buffer.get_window()
+                buf_m  = det._buffer.dynamic_m(min_m=det.min_m)
+                n_s    = len(states)
+                mat    = np.zeros((n_s, n_s), dtype=np.float32)
+                for ii in range(n_s):
+                    for jj in range(ii + 1, n_s):
+                        d = states[ii].bhattacharyya_distance(states[jj])
+                        mat[ii, jj] = d
+                        mat[jj, ii] = d
+                buf_matrix = mat
+
             info = {
                 "frame_number":  i,
                 "bhat":          det.signal_history[-1]    if n else 0.0,
@@ -636,6 +872,8 @@ class ProcessingThread(QThread):
                 "is_event":      ev is not None,
                 "old_hist":      ev.old_state.histogram() if ev and ev.old_state else None,
                 "new_hist":      ev.new_state.histogram() if ev and ev.new_state else None,
+                "buf_matrix":    buf_matrix,
+                "buf_m":         buf_m,
             }
             self.frame_ready.emit(bgr, info)
             if ev:
@@ -1205,6 +1443,33 @@ class VisualizerWindow(QMainWindow):
         hw.setLayout(hrow)
         right.addWidget(hw, stretch=1)
 
+        # Матрица расстояний
+        mg = QGroupBox("МАТРИЦА РАССТОЯНИЙ БУФЕРА  (синий=похожи  красный=различны)")
+        mgl = QHBoxLayout(mg)
+        mgl.setContentsMargins(4, 4, 4, 4)
+        self.dist_matrix = DistanceMatrixWidget()
+        mgl.addWidget(self.dist_matrix)
+
+        # Легенда справа от матрицы
+        leg = QVBoxLayout()
+        leg.setSpacing(4)
+        leg.setContentsMargins(6, 0, 0, 0)
+        for txt, color in [
+            ("Синий блок\n= стабильная зона",    C['signal']),
+            ("2 блока + крест\n= настоящий переход", C['event']),
+            ("Хаос\n= шум/ложняк",               C['threshold']),
+            ("Диагональ\n= плавный градиент",     C['muted']),
+        ]:
+            lbl = QLabel(txt)
+            lbl.setStyleSheet(f"color:{color}; font-size:9px;")
+            lbl.setWordWrap(True)
+            lbl.setMaximumWidth(110)
+            leg.addWidget(lbl)
+        leg.addStretch()
+        mgl.addLayout(leg)
+
+        right.addWidget(mg, stretch=2)
+
         # Траектория
         tg = QGroupBox("ТРАЕКТОРИЯ НАД КАРТОЙ")
         tgl = QVBoxLayout(tg)
@@ -1307,6 +1572,7 @@ class VisualizerWindow(QMainWindow):
         # Сбрасываем UI
         self.signal_plot.reset()
         self.traj_widget.reset()
+        self.dist_matrix.clear()
         self.event_list.clear()
         self.lbl_events.setText("событий: 0")
 
@@ -1397,6 +1663,14 @@ class VisualizerWindow(QMainWindow):
         )
         if info["is_event"]:
             self.traj_widget.add_event()
+
+        # Матрица расстояний
+        if info.get("buf_matrix") is not None:
+            self.dist_matrix.update_matrix(
+                info["buf_matrix"],
+                info["buf_m"],
+                info["in_transition"]
+            )
 
         # Гистограммы при переходе
         if info["old_hist"] is not None:
