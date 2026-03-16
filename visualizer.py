@@ -236,28 +236,30 @@ class SignalPlot(QWidget):
         self.setStyleSheet(f"background: {C['widget']}; border: 1px solid {C['border']}; border-radius:4px;")
 
         self._bhat:      list[float] = []
-        self._lr_norm:   list[float] = []    # LR нормализован в [0,1]
+        self._lr_norm:   list[float] = []
         self._threshold: list[float] = []
-        self._events:    list[int]   = []    # индексы событий в истории
+        self._norm:      list[float] = []   # нормализованный сигнал bhat/bg
+        self._events:    list[int]   = []
 
     def add_point(self, bhat: float, lr: float,
-                  threshold: float, is_event: bool):
-        # LR нормализуем: sigmoid(log(lr)) → [0,1]
+                  threshold: float, is_event: bool,
+                  norm: float = 0.0):
         lr_norm = 1.0 / (1.0 + np.exp(-np.log(max(lr, 1e-9))))
 
         self._bhat.append(min(bhat, 1.0))
         self._lr_norm.append(lr_norm)
         self._threshold.append(min(threshold, 1.0))
+        self._norm.append(norm)
 
         if is_event:
             self._events.append(len(self._bhat) - 1)
 
-        # Срезаем историю
         if len(self._bhat) > self.MAX_HISTORY:
             excess = len(self._bhat) - self.MAX_HISTORY
             self._bhat      = self._bhat[excess:]
             self._lr_norm   = self._lr_norm[excess:]
             self._threshold = self._threshold[excess:]
+            self._norm      = self._norm[excess:]
             self._events    = [e - excess for e in self._events if e - excess >= 0]
 
         self.update()
@@ -266,7 +268,9 @@ class SignalPlot(QWidget):
         self._bhat.clear()
         self._lr_norm.clear()
         self._threshold.clear()
+        self._norm.clear()
         self._events.clear()
+        self.update()
         self.update()
 
     def paintEvent(self, event):
@@ -315,7 +319,7 @@ class SignalPlot(QWidget):
                                 Qt.SolidLine))
             painter.drawLine(xi, pad[1], xi, h - pad[3])
 
-        # ── Линия порога ──────────────────────────────────────
+        # ── Линия порога (в абс. единицах) ───────────────────
         pen_thr = QPen(QColor(C['threshold']), 1, Qt.DashLine)
         pen_thr.setDashPattern([4, 3])
         painter.setPen(pen_thr)
@@ -331,6 +335,22 @@ class SignalPlot(QWidget):
         for i in range(len(pts_lr) - 1):
             painter.drawLine(*pts_lr[i], *pts_lr[i + 1])
 
+        # ── Нормализованный сигнал bhat/bg ────────────────────
+        # Масштабируем: порог детектора = peak_threshold (обычно 2.0)
+        # Отображаем как долю от [0, peak_threshold*2] → [0, 1]
+        if self._norm:
+            norm_scale = max(max(self._norm), 4.0)
+            painter.setPen(QPen(QColor("#e91e63"), 1.5))   # розовый
+            pts_n = [to_px(i, min(self._norm[i] / norm_scale, 1.0))
+                     for i in range(n)]
+            for i in range(len(pts_n) - 1):
+                painter.drawLine(*pts_n[i], *pts_n[i + 1])
+            # Горизонтальная линия порога пика (norm=2.0 → y=2/norm_scale)
+            y_thr = pad[1] + int((1.0 - 2.0 / norm_scale) * ph)
+            pen_pt = QPen(QColor("#e91e63"), 1, Qt.DotLine)
+            painter.setPen(pen_pt)
+            painter.drawLine(pad[0], y_thr, w - pad[2], y_thr)
+
         # ── Линия Бхаттачарья ─────────────────────────────────
         painter.setPen(QPen(QColor(C['signal']), 1.5))
         pts_b = [to_px(i, self._bhat[i]) for i in range(n)]
@@ -341,16 +361,17 @@ class SignalPlot(QWidget):
         ly = h - 3
         painter.setFont(QFont("Consolas", 8))
         items = [
-            (C['signal'],    "─  Бхатт"),
-            (C['lr'],        "╌  LR"),
-            (C['threshold'], "╌  порог"),
-            (C['event'],     "│  переход"),
+            (C['signal'],  "─  Бхатт"),
+            ("#e91e63",    "─  норм."),
+            (C['lr'],      "╌  LR"),
+            (C['threshold'],"╌  порог(абс)"),
+            (C['event'],   "│  переход"),
         ]
         lx = pad[0]
         for color, label in items:
             painter.setPen(QColor(color))
             painter.drawText(lx, ly, label)
-            lx += len(label) * 6 + 10
+            lx += len(label) * 6 + 6
 
 
 # ─────────────────────────────────────────────────────────────
@@ -942,6 +963,7 @@ class ProcessingThread(QThread):
                 "new_hist":      ev.new_state.histogram() if ev and ev.new_state else live_new_hist,
                 "old_conf":      live_old_conf,
                 "new_conf":      live_new_conf,
+                "norm":          det.norm_history[-1] if det.norm_history else 0.0,
                 "buf_matrix":    buf_matrix,
                 "buf_m":         buf_m,
             }
@@ -1398,26 +1420,59 @@ class ParamPanel(QWidget):
         form.setSpacing(5)
 
         self.spin_window = QSpinBox()
-        self.spin_window.setRange(10, 100)
-        self.spin_window.setValue(30)
+        self.spin_window.setRange(10, 200)
+        self.spin_window.setValue(40)
+        self.spin_window.setToolTip("Размер скользящего окна в кадрах")
         form.addRow("Окно:", self.spin_window)
 
         self.spin_minm = QSpinBox()
         self.spin_minm.setRange(2, 30)
         self.spin_minm.setValue(5)
+        self.spin_minm.setToolTip("Минимальное число 'новых' кадров для сигнала")
         form.addRow("Min M:", self.spin_minm)
 
+        self.spin_peak = QDoubleSpinBox()
+        self.spin_peak.setRange(1.1, 10.0)
+        self.spin_peak.setSingleStep(0.1)
+        self.spin_peak.setValue(2.0)
+        self.spin_peak.setToolTip(
+            "Порог пика: сигнал / фон.\n"
+            "2.0 = сигнал должен быть вдвое выше фона.\n"
+            "Уменьшить → чувствительнее, больше ложняков.\n"
+            "Увеличить → пропустит слабые переходы."
+        )
+        form.addRow("Порог пика:", self.spin_peak)
+
         self.spin_alpha = QDoubleSpinBox()
-        self.spin_alpha.setRange(0.01, 0.3)
+        self.spin_alpha.setRange(0.5, 0.999)
         self.spin_alpha.setSingleStep(0.01)
-        self.spin_alpha.setValue(0.05)
-        form.addRow("α (FA):", self.spin_alpha)
+        self.spin_alpha.setDecimals(3)
+        self.spin_alpha.setValue(0.95)
+        self.spin_alpha.setToolTip(
+            "Коэффициент забывания фона (EMA).\n"
+            "0.95 = медленная адаптация (стабильное освещение).\n"
+            "0.7  = быстрая адаптация (переменное освещение)."
+        )
+        form.addRow("Забывание α:", self.spin_alpha)
 
         self.spin_lr = QDoubleSpinBox()
         self.spin_lr.setRange(1.0, 10.0)
         self.spin_lr.setSingleStep(0.1)
-        self.spin_lr.setValue(1.2)
+        self.spin_lr.setValue(1.5)
+        self.spin_lr.setToolTip(
+            "Минимальный LR для подтверждения пика.\n"
+            "Фильтрует изменения освещения."
+        )
         form.addRow("LR фильтр:", self.spin_lr)
+
+        self.spin_width = QSpinBox()
+        self.spin_width.setRange(1, 20)
+        self.spin_width.setValue(3)
+        self.spin_width.setToolTip(
+            "Минимальная ширина пика в кадрах.\n"
+            "Защита от одиночных шумовых выбросов."
+        )
+        form.addRow("Мин. ширина:", self.spin_width)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1427,8 +1482,10 @@ class ParamPanel(QWidget):
         return {
             "window_size":      self.spin_window.value(),
             "min_m":            self.spin_minm.value(),
-            "false_alarm_rate": self.spin_alpha.value(),
+            "peak_threshold":   self.spin_peak.value(),
+            "forgetting_alpha": self.spin_alpha.value(),
             "lr_filter_thresh": self.spin_lr.value(),
+            "min_peak_width":   self.spin_width.value(),
         }
 
 
@@ -1794,7 +1851,8 @@ class VisualizerWindow(QMainWindow):
         )
 
         # График
-        self.signal_plot.add_point(bhat, lr, thr, info["is_event"])
+        norm_val = info.get("norm", 0.0)
+        self.signal_plot.add_point(bhat, lr, thr, info["is_event"], norm_val)
 
         # Траектория
         self.traj_widget.add_position(
