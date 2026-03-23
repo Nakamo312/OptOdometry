@@ -155,13 +155,26 @@ class FrameWidget(QLabel):
         self._in_transition = False
         self._zone_color   = QColor(C['signal'])
         self._flash        = 0
+        self._heading      = 0.0
 
     def set_frame(self, bgr: np.ndarray, frame_number: int,
-                  in_transition: bool, zone_color: QColor):
-        self._frame_bgr     = bgr.copy()
+                  in_transition: bool, zone_color: QColor,
+                  heading: float = 0.0):
+        # Поворачиваем кадр так чтобы направление движения всегда было вверх.
+        # heading=0 означает движение вправо (ось X карты),
+        # поэтому нам нужно повернуть изображение на -(heading + 90) градусов,
+        # чтобы вектор движения смотрел вверх в кадре.
+        angle = -(heading + 90.0)
+        fh, fw = bgr.shape[:2]
+        M   = cv2.getRotationMatrix2D((fw / 2, fh / 2), angle, 1.0)
+        rot = cv2.warpAffine(bgr, M, (fw, fh),
+                             flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+        self._frame_bgr     = rot
         self._frame_number  = frame_number
         self._in_transition = in_transition
         self._zone_color    = zone_color
+        self._heading       = heading
         if in_transition:
             self._flash = 8
         elif self._flash > 0:
@@ -864,6 +877,8 @@ class ProcessingThread(QThread):
         wps = getattr(self.source, '_user_waypoints', None)
         if not wps:
             wps = self.source.make_default_route(n_segments=4)
+        _prev_pos = None
+        _heading  = 0.0   # градусы, 0 = вправо, 90 = вниз
         for hsv_frame, meta in self.source.fly(wps, speed_pix_per_frame=8):
             if not self._running:
                 break
@@ -872,6 +887,16 @@ class ProcessingThread(QThread):
 
             bgr = cv2.cvtColor(hsv_frame, cv2.COLOR_HSV2BGR)
             ev  = det.process_frame(hsv_frame, meta.frame_number)
+
+            # Вычисляем heading из смещения позиции
+            cur_pos = (meta.position_x, meta.position_y)
+            if _prev_pos is not None:
+                dx = cur_pos[0] - _prev_pos[0]
+                dy = cur_pos[1] - _prev_pos[1]
+                if abs(dx) > 0.1 or abs(dy) > 0.1:
+                    import math
+                    _heading = math.degrees(math.atan2(dy, dx))
+            _prev_pos = cur_pos
 
             n    = len(det.signal_history)
             bhat = det.signal_history[-1]    if n else 0.0
@@ -933,6 +958,7 @@ class ProcessingThread(QThread):
                 "norm":          det.norm_history[-1] if det.norm_history else 0.0,
                 "bhat_raw":      det.bhat_raw_history[-1] if det.bhat_raw_history else 0.0,
                 "block":         det.block_history[-1] if det.block_history else 0.0,
+                "heading":       _heading,
                 "buf_matrix":    buf_matrix,
                 "buf_m":         buf_m,
             }
@@ -998,6 +1024,7 @@ class ProcessingThread(QThread):
                 "new_hist":      ev.new_state.histogram() if ev and ev.new_state else live_new_hist,
                 "bhat_raw":      det.bhat_raw_history[-1] if det.bhat_raw_history else 0.0,
                 "block":         det.block_history[-1] if det.block_history else 0.0,
+                "heading":       0.0,
                 "buf_matrix":    buf_matrix,
                 "buf_m":         buf_m,
             }
@@ -1786,7 +1813,10 @@ class VisualizerWindow(QMainWindow):
             h_mean * 2, max(s_mean, 80), max(v_mean, 120)
         )
 
-        self.frame_widget.set_frame(bgr, fn, info["in_transition"], self._zone_color)
+        self.frame_widget.set_frame(
+            bgr, fn, info["in_transition"], self._zone_color,
+            heading=info.get("heading", 0.0)
+        )
 
         norm_val = info.get("norm", 0.0)
         self.signal_plot.add_point(
