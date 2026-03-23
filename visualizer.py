@@ -152,7 +152,7 @@ class FrameWidget(QLabel):
         self._frame_number = 0
         self._in_transition = False
         self._zone_color   = QColor(C['signal'])
-        self._flash        = 0      # кол-во кадров вспышки
+        self._flash        = 0
 
     def set_frame(self, bgr: np.ndarray, frame_number: int,
                   in_transition: bool, zone_color: QColor):
@@ -178,34 +178,27 @@ class FrameWidget(QLabel):
             painter.drawText(self.rect(), Qt.AlignCenter, "Нет данных\nзапустите воспроизведение")
             return
 
-        # Конвертируем BGR → RGB для Qt
         rgb = cv2.cvtColor(self._frame_bgr, cv2.COLOR_BGR2RGB)
         fh, fw = rgb.shape[:2]
         qimg = QImage(rgb.data, fw, fh, fw * 3, QImage.Format_RGB888)
         pix  = QPixmap.fromImage(qimg)
 
-        # Масштабируем с сохранением пропорций
         scaled = pix.scaled(w - 4, h - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         ox = (w - scaled.width())  // 2
         oy = (h - scaled.height()) // 2
         painter.drawPixmap(ox, oy, scaled)
 
-        # Рамка зоны
         border_color = QColor(C['event']) if self._flash > 0 else self._zone_color
         border_w     = 3 if self._flash > 0 else 2
         pen = QPen(border_color, border_w)
         painter.setPen(pen)
         painter.drawRect(ox, oy, scaled.width() - 1, scaled.height() - 1)
 
-        # Оверлей: номер кадра
         painter.setPen(QColor(C['text']))
         painter.setFont(QFont("Consolas", 9))
-        painter.fillRect(ox + 4, oy + 4, 90, 16,
-                         QColor(0, 0, 0, 140))
-        painter.drawText(ox + 7, oy + 16,
-                         f"frame {self._frame_number:06d}")
+        painter.fillRect(ox + 4, oy + 4, 90, 16, QColor(0, 0, 0, 140))
+        painter.drawText(ox + 7, oy + 16, f"frame {self._frame_number:06d}")
 
-        # Вспышка при переходе
         if self._flash > 0:
             alpha = int(self._flash / 8 * 80)
             painter.fillRect(ox, oy, scaled.width(), scaled.height(),
@@ -219,14 +212,6 @@ class FrameWidget(QLabel):
 #  ВИДЖЕТ: ГРАФИК СИГНАЛОВ
 # ─────────────────────────────────────────────────────────────
 class SignalPlot(QWidget):
-    """
-    График трёх сигналов:
-    - Бхаттачарья (основной, голубой)
-    - LR          (фильтрующий, фиолетовый, пунктир)
-    - Порог       (адаптивный, оранжевый, пунктир)
-    Вертикальные красные линии — моменты переходов.
-    """
-
     MAX_HISTORY = 300
 
     def __init__(self, parent=None):
@@ -238,7 +223,7 @@ class SignalPlot(QWidget):
         self._bhat:      list[float] = []
         self._lr_norm:   list[float] = []
         self._threshold: list[float] = []
-        self._norm:      list[float] = []   # нормализованный сигнал bhat/bg
+        self._norm:      list[float] = []
         self._events:    list[int]   = []
 
     def add_point(self, bhat: float, lr: float,
@@ -271,13 +256,12 @@ class SignalPlot(QWidget):
         self._norm.clear()
         self._events.clear()
         self.update()
-        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        pad  = (36, 6, 6, 18)    # left, top, right, bottom
+        pad  = (36, 6, 6, 18)
 
         pw = w - pad[0] - pad[2]
         ph = h - pad[1] - pad[3]
@@ -295,7 +279,6 @@ class SignalPlot(QWidget):
             y = pad[1] + int((1.0 - val) * ph)
             return x, y
 
-        # ── Сетка ────────────────────────────────────────────
         painter.setPen(QPen(QColor(C['border']), 0.5))
         for frac in [0.25, 0.5, 0.75, 1.0]:
             yg = pad[1] + int((1.0 - frac) * ph)
@@ -305,21 +288,17 @@ class SignalPlot(QWidget):
             painter.drawText(2, yg + 4, f"{frac:.2f}")
             painter.setPen(QPen(QColor(C['border']), 0.5))
 
-        # ── Ось X (номера кадров) ─────────────────────────────
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 8))
         for step in [0, n // 4, n // 2, 3 * n // 4, n - 1]:
             xi = pad[0] + int(step / max(n - 1, 1) * pw)
             painter.drawText(xi - 10, h - 3, f"{step}")
 
-        # ── Вертикальные линии событий ───────────────────────
         for ei in self._events:
             xi = pad[0] + int(ei / max(self.MAX_HISTORY - 1, 1) * pw)
-            painter.setPen(QPen(QColor(C['event']), 1,
-                                Qt.SolidLine))
+            painter.setPen(QPen(QColor(C['event']), 1, Qt.SolidLine))
             painter.drawLine(xi, pad[1], xi, h - pad[3])
 
-        # ── Линия порога (в абс. единицах) ───────────────────
         pen_thr = QPen(QColor(C['threshold']), 1, Qt.DashLine)
         pen_thr.setDashPattern([4, 3])
         painter.setPen(pen_thr)
@@ -327,7 +306,6 @@ class SignalPlot(QWidget):
         for i in range(len(pts_thr) - 1):
             painter.drawLine(*pts_thr[i], *pts_thr[i + 1])
 
-        # ── Линия LR ──────────────────────────────────────────
         pen_lr = QPen(QColor(C['lr']), 1, Qt.DashLine)
         pen_lr.setDashPattern([5, 3])
         painter.setPen(pen_lr)
@@ -335,37 +313,30 @@ class SignalPlot(QWidget):
         for i in range(len(pts_lr) - 1):
             painter.drawLine(*pts_lr[i], *pts_lr[i + 1])
 
-        # ── Нормализованный сигнал bhat/bg ────────────────────
-        # Масштабируем: порог детектора = peak_threshold (обычно 2.0)
-        # Отображаем как долю от [0, peak_threshold*2] → [0, 1]
         if self._norm:
             norm_scale = max(max(self._norm), 4.0)
-            painter.setPen(QPen(QColor("#e91e63"), 1.5))   # розовый
-            pts_n = [to_px(i, min(self._norm[i] / norm_scale, 1.0))
-                     for i in range(n)]
+            painter.setPen(QPen(QColor("#e91e63"), 1.5))
+            pts_n = [to_px(i, min(self._norm[i] / norm_scale, 1.0)) for i in range(n)]
             for i in range(len(pts_n) - 1):
                 painter.drawLine(*pts_n[i], *pts_n[i + 1])
-            # Горизонтальная линия порога пика (norm=2.0 → y=2/norm_scale)
             y_thr = pad[1] + int((1.0 - 2.0 / norm_scale) * ph)
             pen_pt = QPen(QColor("#e91e63"), 1, Qt.DotLine)
             painter.setPen(pen_pt)
             painter.drawLine(pad[0], y_thr, w - pad[2], y_thr)
 
-        # ── Линия Бхаттачарья ─────────────────────────────────
         painter.setPen(QPen(QColor(C['signal']), 1.5))
         pts_b = [to_px(i, self._bhat[i]) for i in range(n)]
         for i in range(len(pts_b) - 1):
             painter.drawLine(*pts_b[i], *pts_b[i + 1])
 
-        # ── Легенда ───────────────────────────────────────────
         ly = h - 3
         painter.setFont(QFont("Consolas", 8))
         items = [
-            (C['signal'],  "─  Бхатт"),
-            ("#e91e63",    "─  норм."),
-            (C['lr'],      "╌  LR"),
-            (C['threshold'],"╌  порог(абс)"),
-            (C['event'],   "│  переход"),
+            (C['signal'],   "─  Бхатт"),
+            ("#e91e63",     "─  норм."),
+            (C['lr'],       "╌  LR"),
+            (C['threshold'], "╌  порог(абс)"),
+            (C['event'],    "│  переход"),
         ]
         lx = pad[0]
         for color, label in items:
@@ -378,21 +349,11 @@ class SignalPlot(QWidget):
 #  ВИДЖЕТ: ГИСТОГРАММА H
 # ─────────────────────────────────────────────────────────────
 class HistWidget(QWidget):
-    """
-    Гистограмма канала H (16 бинов).
-
-    Цвет столбика = оттенок H который этот бин представляет
-                    (визуальная подсказка, не аналитика)
-    Высота столбика = доля пикселей кадра с этим оттенком
-    Ось X = оттенок H: 0°=красный, 30°=оранжевый, 60°=жёлтый,
-                       90°=жёлто-зелёный, 120°=зелёный, 150°=голубой
-    """
-
     def __init__(self, title="Гистограмма H", parent=None):
         super().__init__(parent)
         self._title      = title
         self._bins       = np.zeros(16, dtype=np.float32)
-        self._confidence = 0.0   # s_confidence: доверие к H [0,1]
+        self._confidence = 0.0
         self._bhat_val   = None
         self._pair: "HistWidget | None" = None
         self.setMinimumSize(120, 90)
@@ -412,7 +373,6 @@ class HistWidget(QWidget):
         self.update()
 
     def set_pair(self, other: "HistWidget"):
-        """Связать с парным виджетом для показа Бхаттачарьи."""
         self._pair = other
 
     def paintEvent(self, event):
@@ -420,21 +380,16 @@ class HistWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
 
-        # Отступы: сверху — заголовок, снизу — ось X с метками
-        pad_top  = 28
-        pad_bot  = 22
-        pad_left = 4
+        pad_top   = 28
+        pad_bot   = 22
+        pad_left  = 4
         pad_right = 4
 
         painter.fillRect(0, 0, w, h, QColor(C['widget']))
 
-        # ── Полоска доверия к H (насыщенность S) ─────────────
-        # Серая зона = H ненадёжен, цветная = H информативен
         conf_w = int((w - pad_left - pad_right) * min(self._confidence, 1.0))
-        painter.fillRect(pad_left, 14, w - pad_left - pad_right, 4,
-                         QColor(C['border']))
+        painter.fillRect(pad_left, 14, w - pad_left - pad_right, 4, QColor(C['border']))
         if conf_w > 0:
-            # Цвет: красный (низкое доверие) → зелёный (высокое)
             r = int(200 * (1.0 - self._confidence))
             g = int(180 * self._confidence)
             painter.fillRect(pad_left, 14, conf_w, 4, QColor(r, g, 60))
@@ -442,12 +397,10 @@ class HistWidget(QWidget):
         painter.setFont(QFont("Consolas", 7))
         painter.drawText(w - 60, 19, f"S={self._confidence:.2f}")
 
-        # ── Заголовок ─────────────────────────────────────────
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 8))
         painter.drawText(pad_left, 11, self._title)
 
-        # ── Бхаттачарья с парным виджетом ─────────────────────
         if self._pair is not None and np.any(self._bins) and np.any(self._pair._bins):
             import cv2 as _cv2
             b = float(_cv2.compareHist(
@@ -455,7 +408,6 @@ class HistWidget(QWidget):
                 self._pair._bins.astype(np.float32),
                 _cv2.HISTCMP_BHATTACHARYYA
             ))
-            # Цвет: зелёный (похожи) → красный (различны)
             if b < 0.2:
                 bc = QColor(C['old_zone'])
             elif b < 0.4:
@@ -473,8 +425,7 @@ class HistWidget(QWidget):
         if not np.any(self._bins):
             painter.setPen(QColor(C['muted']))
             painter.setFont(QFont("Consolas", 8))
-            painter.drawText(pad_left, pad_top + ph // 2 + 4,
-                             "буфер заполняется...")
+            painter.drawText(pad_left, pad_top + ph // 2 + 4, "буфер заполняется...")
             return
 
         max_val  = float(self._bins.max()) or 1.0
@@ -486,33 +437,26 @@ class HistWidget(QWidget):
             bx  = pad_left + int(i * bar_w)
             by  = pad_top + ph - bh
 
-            # Цвет бара = оттенок H который он представляет
             hue_qt = int(i * hue_step * 2)
             sat    = 200
-            # Затемняем бары с низким значением
             vib    = max(80, int(220 * (val / max_val)))
             color  = QColor.fromHsv(hue_qt, sat, vib)
             painter.fillRect(bx, by, max(int(bar_w) - 1, 1), bh, color)
 
-            # Если есть парный виджет — показываем расхождение
             if self._pair is not None and np.any(self._pair._bins):
-                pair_val  = float(self._pair._bins[i])
-                pair_h    = int((pair_val / max_val) * ph)
-                diff      = abs(bh - pair_h)
+                pair_val = float(self._pair._bins[i])
+                pair_h   = int((pair_val / max_val) * ph)
+                diff     = abs(bh - pair_h)
                 if diff > 3:
-                    # Полупрозрачная красная зона расхождения
                     painter.fillRect(
                         bx, min(by, pad_top + ph - pair_h),
                         max(int(bar_w) - 1, 1), diff,
                         QColor(239, 83, 80, 60)
                     )
 
-        # ── Базовая линия ────────────────────────────────────
         painter.setPen(QPen(QColor(C['border']), 0.5))
-        painter.drawLine(pad_left, pad_top + ph,
-                         w - pad_right, pad_top + ph)
+        painter.drawLine(pad_left, pad_top + ph, w - pad_right, pad_top + ph)
 
-        # ── Ось X с метками оттенков ──────────────────────────
         painter.setFont(QFont("Consolas", 7))
         labels = {
             0:  "0°\nкрасн",
@@ -528,7 +472,6 @@ class HistWidget(QWidget):
             painter.drawText(lx - 10, h - pad_bot + 10, line1)
             painter.drawText(lx - 10, h - pad_bot + 19, line2)
 
-        # ── Метка "старая" / "новая" ──────────────────────────
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 7))
         role = "← первая половина буфера" if "стар" in self._title else "← вторая половина буфера"
@@ -540,8 +483,8 @@ class HistWidget(QWidget):
 # ─────────────────────────────────────────────────────────────
 class TrajectoryWidget(QWidget):
     """
-    Горизонтальная полоса: траектория БПЛА, позиция, метки переходов,
-    цветные зоны снизу (по доминирующему цвету каждого отрезка).
+    Горизонтальная полоса: траектория БПЛА, позиция, метки переходов.
+    Переходы отмечаются кружком прямо на линии маршрута.
     """
 
     def __init__(self, parent=None):
@@ -552,11 +495,11 @@ class TrajectoryWidget(QWidget):
         self.setStyleSheet(
             f"background: {C['widget']}; border:1px solid {C['border']}; border-radius:4px;"
         )
-        self._positions:   list[tuple] = []   # (x, y) пикселей карты
+        self._positions:   list[tuple]  = []
         self._map_w:       int  = 1
         self._map_h:       int  = 1
-        self._events_pos:  list[int]   = []   # индексы позиций переходов
-        self._zone_colors: list[QColor] = []   # цвет каждого шага
+        self._events_pos:  list[int]    = []
+        self._zone_colors: list[QColor] = []
 
     def set_map_size(self, w: int, h: int):
         self._map_w = w
@@ -588,7 +531,6 @@ class TrajectoryWidget(QWidget):
 
         pw = w - pad[0] - pad[2]
 
-        # Заголовок
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 8))
         painter.drawText(pad[0], 12, "траектория БПЛА над картой")
@@ -598,15 +540,14 @@ class TrajectoryWidget(QWidget):
             return
 
         def pos_to_x(idx):
-            # Проецируем X позиции карты на ширину виджета
             px = self._positions[idx][0]
             return pad[0] + int((px / max(self._map_w, 1)) * pw)
 
         track_y = pad[1] + (h - pad[1] - pad[3]) // 2
 
         # ── Цветные зоны под траекторией ──────────────────────
-        zone_y  = h - pad[3] + 2
-        zone_h  = 10
+        zone_y = h - pad[3] + 2
+        zone_h = 10
         for i in range(n - 1):
             x0 = pos_to_x(i)
             x1 = pos_to_x(i + 1)
@@ -621,13 +562,28 @@ class TrajectoryWidget(QWidget):
             painter.drawLine(pos_to_x(i), track_y, pos_to_x(i + 1), track_y)
 
         # ── Метки переходов ───────────────────────────────────
+        # Сначала рисуем все пунктирные линии (под кружками)
         for j, ei in enumerate(self._events_pos):
             ex = pos_to_x(ei)
-            painter.setPen(QPen(QColor(C['event']), 1.5))
+            pen_dash = QPen(QColor(C['event']), 1, Qt.DashLine)
+            pen_dash.setDashPattern([3, 3])
+            painter.setPen(pen_dash)
             painter.drawLine(ex, pad[1] + 2, ex, h - pad[3] + zone_h + 2)
-            painter.setFont(QFont("Consolas", 7, QFont.Bold))
+
+        # Затем кружки поверх всего
+        for j, ei in enumerate(self._events_pos):
+            ex = pos_to_x(ei)
+            r  = 5
+
+            # Кружок на линии трека
+            painter.setBrush(QBrush(QColor(C['event'])))
+            painter.setPen(QPen(QColor("white"), 1.2))
+            painter.drawEllipse(ex - r, track_y - r, r * 2, r * 2)
+
+            # Подпись над кружком
             painter.setPen(QColor(C['event']))
-            painter.drawText(ex - 6, pad[1], f"T{j+1}")
+            painter.setFont(QFont("Consolas", 7, QFont.Bold))
+            painter.drawText(ex - 6, track_y - r - 3, f"T{j+1}")
 
         # ── Текущая позиция ───────────────────────────────────
         cx = pos_to_x(n - 1)
@@ -640,41 +596,13 @@ class TrajectoryWidget(QWidget):
 #  ВИДЖЕТ: МАТРИЦА РАССТОЯНИЙ БУФЕРА
 # ─────────────────────────────────────────────────────────────
 class DistanceMatrixWidget(QWidget):
-    """
-    Квадратная тепловая карта N×N — расстояния Бхаттачарьи
-    между каждой парой кадров в буфере.
-
-    Что читать на матрице
-    ─────────────────────
-    Однородная синяя матрица
-        Все кадры в буфере похожи → буфер стабилен → переходов нет.
-
-    Два синих блока по диагонали + яркая крестовина между ними
-        В буфере есть переход: старые кадры похожи между собой,
-        новые похожи между собой, но старые ≠ новые.
-        Именно это состояние должно давать высокий LR и Бхаттачарью.
-
-    Хаотичная матрица без блочной структуры
-        Буфер содержит шум или быстро меняющуюся сцену.
-        Ложное срабатывание — LR высокий но блоков нет.
-
-    Красная диагональная полоса (не блок)
-        Плавный градиентный переход — освещение меняется постепенно.
-
-    Белая вертикальная/горизонтальная линия
-        Один аномальный кадр (засветка, тень) — не настоящий переход.
-
-    Цветовая шкала: синий=0 (идентичны) → красный=1 (максимально различны)
-    """
-
-    # Цветовая карта: синий → голубой → зелёный → жёлтый → красный
     _COLORMAP = [
-        (0.00, ( 20,  60, 180)),   # тёмно-синий
-        (0.20, ( 40, 140, 220)),   # голубой
-        (0.40, ( 30, 190, 160)),   # циан-зелёный
-        (0.60, (200, 210,  40)),   # жёлто-зелёный
-        (0.80, (240, 120,  20)),   # оранжевый
-        (1.00, (220,  30,  30)),   # красный
+        (0.00, ( 20,  60, 180)),
+        (0.20, ( 40, 140, 220)),
+        (0.40, ( 30, 190, 160)),
+        (0.60, (200, 210,  40)),
+        (0.80, (240, 120,  20)),
+        (1.00, (220,  30,  30)),
     ]
 
     def __init__(self, parent=None):
@@ -684,48 +612,28 @@ class DistanceMatrixWidget(QWidget):
         self.setStyleSheet(
             f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;"
         )
-
-        # Последняя матрица N×N расстояний Бхаттачарьи
         self._matrix:     np.ndarray | None = None
         self._n:          int  = 0
-        self._m:          int  = 0     # текущий M (граница старое/новое)
+        self._m:          int  = 0
         self._is_trigger: bool = False
-
-        # Кэш QImage чтобы не перерисовывать каждый раз
         self._img_cache:  QImage | None = None
         self._cache_n:    int = -1
 
-    # ── Публичный интерфейс ───────────────────────────────────
-
     def update_matrix(self, matrix: np.ndarray, m: int, is_trigger: bool):
-        """
-        Принять новую матрицу расстояний.
-
-        Параметры
-        ----------
-        matrix     : np.ndarray  shape (N, N), dtype float32, значения [0,1]
-        m          : int          текущий M — граница старое/новое в буфере
-        is_trigger : bool         детектор сейчас в состоянии перехода
-        """
         self._matrix     = matrix
         self._n          = matrix.shape[0]
         self._m          = m
         self._is_trigger = is_trigger
-
-        # Инвалидируем кэш только если размер изменился
         if self._n != self._cache_n:
             self._img_cache = None
             self._cache_n   = self._n
-
         self.update()
 
     def clear(self):
-        self._matrix     = None
-        self._n          = 0
-        self._img_cache  = None
+        self._matrix    = None
+        self._n         = 0
+        self._img_cache = None
         self.update()
-
-    # ── Отрисовка ─────────────────────────────────────────────
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -742,14 +650,13 @@ class DistanceMatrixWidget(QWidget):
             return
 
         pad_top   = 14
-        pad_right = 52   # место для шкалы
+        pad_right = 52
         pad_bot   = 14
         pad_left  = 14
 
         cell_w = (w - pad_left - pad_right) / self._n
         cell_h = (h - pad_top  - pad_bot)   / self._n
 
-        # ── Рисуем ячейки ─────────────────────────────────────
         for i in range(self._n):
             for j in range(self._n):
                 val   = float(self._matrix[i, j])
@@ -762,7 +669,6 @@ class DistanceMatrixWidget(QWidget):
                     color
                 )
 
-        # ── Линия границы M (старое/новое) ────────────────────
         split = self._n - self._m
         if 0 < split < self._n:
             lx = pad_left + split * cell_w
@@ -773,58 +679,46 @@ class DistanceMatrixWidget(QWidget):
             pen = QPen(QColor("white"), 1.5, Qt.DashLine)
             pen.setDashPattern([3, 2])
             painter.setPen(pen)
-            # Вертикальная линия
             painter.drawLine(int(lx), pad_top, int(lx), int(my_end))
-            # Горизонтальная линия
             painter.drawLine(pad_left, int(ly), int(mx_end), int(ly))
 
-            # Метки
             painter.setFont(QFont("Consolas", 7))
             painter.setPen(QColor("white"))
             painter.drawText(int(lx) + 2, pad_top + 9, f"M={self._m}")
 
-        # ── Рамка матрицы ─────────────────────────────────────
         mat_w = int(self._n * cell_w)
         mat_h = int(self._n * cell_h)
         border_color = QColor(C['event']) if self._is_trigger else QColor(C['border'])
         painter.setPen(QPen(border_color, 1.5 if self._is_trigger else 0.5))
         painter.drawRect(pad_left, pad_top, mat_w, mat_h)
 
-        # ── Шкала цветов (правый край) ────────────────────────
-        sc_x  = w - pad_right + 6
-        sc_y  = pad_top
-        sc_h  = mat_h
-        sc_w  = 10
+        sc_x = w - pad_right + 6
+        sc_y = pad_top
+        sc_h = mat_h
+        sc_w = 10
 
         steps = 64
         for si in range(steps):
             frac  = si / (steps - 1)
             color = self._val_to_color(frac)
             sy    = sc_y + int(frac * sc_h)
-            painter.fillRect(sc_x, sy, sc_w,
-                             max(int(sc_h / steps) + 1, 1), color)
+            painter.fillRect(sc_x, sy, sc_w, max(int(sc_h / steps) + 1, 1), color)
 
-        # Метки шкалы
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 7))
-        painter.drawText(sc_x + sc_w + 2, sc_y + 6,        "1.0")
+        painter.drawText(sc_x + sc_w + 2, sc_y + 6,         "1.0")
         painter.drawText(sc_x + sc_w + 2, sc_y + sc_h // 2, "0.5")
         painter.drawText(sc_x + sc_w + 2, sc_y + sc_h - 2,  "0.0")
 
-        # ── Подпись состояния ─────────────────────────────────
         painter.setFont(QFont("Consolas", 8, QFont.Bold))
         if self._is_trigger:
             painter.setPen(QColor(C['event']))
             painter.drawText(pad_left + 2, pad_top - 2, "ПЕРЕХОД")
         else:
             painter.setPen(QColor(C['muted']))
-            painter.drawText(pad_left + 2, pad_top - 2,
-                             f"N={self._n}  M={self._m}")
-
-    # ── Вспомогательные ───────────────────────────────────────
+            painter.drawText(pad_left + 2, pad_top - 2, f"N={self._n}  M={self._m}")
 
     def _val_to_color(self, val: float) -> QColor:
-        """Интерполировать значение [0,1] в цвет по colormap."""
         val = max(0.0, min(1.0, val))
         cm  = self._COLORMAP
         for k in range(len(cm) - 1):
@@ -864,21 +758,17 @@ class EventListWidget(QListWidget):
 #  ПОТОК ОБРАБОТКИ КАДРОВ
 # ─────────────────────────────────────────────────────────────
 class ProcessingThread(QThread):
-    """
-    Фоновый поток: генерирует кадры из симулятора или файлов,
-    прогоняет через детектор, отправляет результаты в UI.
-    """
-    frame_ready  = pyqtSignal(np.ndarray, dict)   # (bgr_frame, info)
-    event_found  = pyqtSignal(object)              # TransitionEvent
+    frame_ready  = pyqtSignal(np.ndarray, dict)
+    event_found  = pyqtSignal(object)
     finished_all = pyqtSignal()
 
     def __init__(self, source, detector_params: dict, parent=None):
         super().__init__(parent)
-        self.source          = source    # FlightSimulator | list[str]
+        self.source          = source
         self.detector_params = detector_params
         self._running        = True
         self._paused         = False
-        self._delay_ms       = 33        # ~30 fps
+        self._delay_ms       = 33
 
     def run(self):
         det = TransitionDetector(**self.detector_params)
@@ -891,7 +781,6 @@ class ProcessingThread(QThread):
         self.finished_all.emit()
 
     def _run_simulator(self, det: TransitionDetector):
-        # Берём пользовательский маршрут если задан, иначе дефолтный
         wps = getattr(self.source, '_user_waypoints', None)
         if not wps:
             wps = self.source.make_default_route(n_segments=4)
@@ -904,12 +793,11 @@ class ProcessingThread(QThread):
             bgr = cv2.cvtColor(hsv_frame, cv2.COLOR_HSV2BGR)
             ev  = det.process_frame(hsv_frame, meta.frame_number)
 
-            n   = len(det.signal_history)
-            bhat = det.signal_history[-1]   if n else 0.0
-            lr   = det.lr_history[-1]       if n else 1.0
+            n    = len(det.signal_history)
+            bhat = det.signal_history[-1]    if n else 0.0
+            lr   = det.lr_history[-1]        if n else 1.0
             thr  = det.threshold_history[-1] if n else 0.3
 
-            # Матрица расстояний буфера (каждые 3 кадра для производительности)
             buf_matrix = None
             buf_m      = 0
             if meta.frame_number % 3 == 0 and det._buffer.is_full():
@@ -925,7 +813,6 @@ class ProcessingThread(QThread):
                         mat[jj, ii] = d
                 buf_matrix = mat
 
-            # Живые гистограммы — средние по половинам буфера
             live_old_hist = None
             live_new_hist = None
             live_old_conf = 0.0
@@ -985,8 +872,7 @@ class ProcessingThread(QThread):
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             ev  = det.process_frame(hsv, i)
 
-            n   = len(det.signal_history)
-            # Матрица расстояний
+            n = len(det.signal_history)
             buf_matrix = None
             buf_m      = 0
             if i % 3 == 0 and det._buffer.is_full():
@@ -1001,7 +887,6 @@ class ProcessingThread(QThread):
                         mat[jj, ii] = d
                 buf_matrix = mat
 
-            # Живые гистограммы
             live_old_hist = None
             live_new_hist = None
             if det._buffer.is_full():
@@ -1048,32 +933,17 @@ class ProcessingThread(QThread):
 #  ВИДЖЕТ: РЕДАКТОР МАРШРУТА
 # ─────────────────────────────────────────────────────────────
 class RouteEditorWidget(QWidget):
-    """
-    Миниатюра карты с рисованием маршрута мышью.
-
-    Управление:
-        ЛКМ           — добавить точку маршрута
-        ПКМ           — удалить последнюю точку
-        Двойной ЛКМ   — завершить маршрут (фиксировать)
-        Колесо мыши   — зум миниатюры
-        Alt + ЛКМ     — панорамирование
-
-    Сигналы:
-        route_changed(list[Waypoint]) — маршрут изменился
-    """
-
     route_changed = pyqtSignal(list)
 
-    # Цвета элементов маршрута
-    CLR_WP        = QColor("#4fc3f7")   # waypoint
-    CLR_WP_FIRST  = QColor("#81c784")   # стартовая точка
-    CLR_WP_LAST   = QColor("#ef5350")   # конечная точка
-    CLR_LINE      = QColor("#7986cb")   # линия маршрута
-    CLR_PREVIEW   = QColor("#ffb74d")   # линия к курсору
-    CLR_DONE      = QColor("#4db6ac")   # финальный маршрут
+    CLR_WP        = QColor("#4fc3f7")
+    CLR_WP_FIRST  = QColor("#81c784")
+    CLR_WP_LAST   = QColor("#ef5350")
+    CLR_LINE      = QColor("#7986cb")
+    CLR_PREVIEW   = QColor("#ffb74d")
+    CLR_DONE      = QColor("#4db6ac")
 
-    WP_RADIUS     = 6    # радиус кружка waypoint в экранных пикселях
-    MIN_WP_DIST   = 8    # минимальное расстояние между точками (пкс экрана)
+    WP_RADIUS  = 6
+    MIN_WP_DIST = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1084,29 +954,26 @@ class RouteEditorWidget(QWidget):
         )
         self.setMouseTracking(True)
 
-        # Данные
-        self._map_pixmap:  QPixmap | None = None   # оригинальный снимок
+        self._map_pixmap:  QPixmap | None = None
         self._map_w:       int = 1
         self._map_h:       int = 1
-        self._waypoints:   list  = []   # [(map_x, map_y, name), ...]
+        self._waypoints:   list  = []
         self._route_done:  bool  = False
-        self._cursor_pos:  tuple | None = None   # позиция курсора в map-coords
+        self._cursor_pos:  tuple | None = None
 
-        # Вид (для зума/панорамы)
-        self._view_offset  = [0.0, 0.0]   # смещение в map-coords
-        self._view_scale   = 1.0           # масштаб (map_px / screen_px)
-        self._panning      = False
-        self._pan_start    = None
+        self._view_offset = [0.0, 0.0]
+        self._view_scale  = 1.0
+        self._panning     = False
+        self._pan_start   = None
 
-        # Кнопки управления
         btn_layout = QHBoxLayout()
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(4)
 
-        self.btn_clear   = QPushButton("Очистить")
-        self.btn_undo    = QPushButton("← Отмена")
-        self.btn_done    = QPushButton("Готово ✓")
-        self.btn_fit     = QPushButton("По экрану")
+        self.btn_clear = QPushButton("Очистить")
+        self.btn_undo  = QPushButton("← Отмена")
+        self.btn_done  = QPushButton("Готово ✓")
+        self.btn_fit   = QPushButton("По экрану")
 
         for btn in [self.btn_clear, self.btn_undo, self.btn_done, self.btn_fit]:
             btn.setFixedHeight(22)
@@ -1117,7 +984,6 @@ class RouteEditorWidget(QWidget):
         self.btn_done.clicked.connect(self._finish_route)
         self.btn_fit.clicked.connect(self._fit_view)
 
-        # Подсказка
         self.lbl_hint = QLabel("ЛКМ — точка  |  ПКМ — отмена  |  2×ЛКМ — готово")
         self.lbl_hint.setStyleSheet(f"color:{C['muted']}; font-size:9px;")
         self.lbl_hint.setAlignment(Qt.AlignCenter)
@@ -1130,10 +996,7 @@ class RouteEditorWidget(QWidget):
         outer.addWidget(self._canvas, stretch=1)
         outer.addWidget(self.lbl_hint)
 
-    # ── Публичные методы ──────────────────────────────────────
-
     def load_map(self, image_path: str):
-        """Загрузить изображение карты в виджет."""
         pix = QPixmap(image_path)
         if pix.isNull():
             return
@@ -1145,10 +1008,6 @@ class RouteEditorWidget(QWidget):
         self._canvas.update()
 
     def get_waypoints(self) -> list:
-        """
-        Вернуть список Waypoint в координатах карты.
-        Пустой список если маршрут не задан.
-        """
         if len(self._waypoints) < 2:
             return []
         return [
@@ -1158,8 +1017,6 @@ class RouteEditorWidget(QWidget):
 
     def has_route(self) -> bool:
         return len(self._waypoints) >= 2
-
-    # ── Слоты кнопок ─────────────────────────────────────────
 
     def _clear_route(self):
         self._waypoints  = []
@@ -1179,14 +1036,11 @@ class RouteEditorWidget(QWidget):
         if len(self._waypoints) >= 2:
             self._route_done = True
             n = len(self._waypoints)
-            self.lbl_hint.setText(
-                f"Маршрут задан: {n} точек  |  нажмите Старт"
-            )
+            self.lbl_hint.setText(f"Маршрут задан: {n} точек  |  нажмите Старт")
             self._canvas.update()
             self.route_changed.emit(self.get_waypoints())
 
     def _fit_view(self):
-        """Подогнать масштаб чтобы вся карта влезла в виджет."""
         if self._map_pixmap is None:
             return
         cw = self._canvas.width()
@@ -1199,26 +1053,19 @@ class RouteEditorWidget(QWidget):
         self._view_offset = [0.0, 0.0]
         self._canvas.update()
 
-    # ── Преобразования координат ──────────────────────────────
-
     def _screen_to_map(self, sx: float, sy: float) -> tuple:
-        """Экранные координаты (canvas) → координаты карты."""
         mx = self._view_offset[0] + sx * self._view_scale
         my = self._view_offset[1] + sy * self._view_scale
         return mx, my
 
     def _map_to_screen(self, mx: float, my: float) -> tuple:
-        """Координаты карты → экранные координаты (canvas)."""
         sx = (mx - self._view_offset[0]) / self._view_scale
         sy = (my - self._view_offset[1]) / self._view_scale
         return sx, sy
 
-    # ── Обработка событий мыши (делегируем в canvas) ─────────
-
     def _mouse_press(self, event):
         if self._map_pixmap is None:
             return
-
         if event.button() == Qt.MiddleButton or (
             event.button() == Qt.LeftButton and
             event.modifiers() & Qt.AltModifier
@@ -1234,7 +1081,6 @@ class RouteEditorWidget(QWidget):
             return
 
         if event.button() == Qt.LeftButton and not self._route_done:
-            # Проверяем минимальное расстояние до последней точки
             if self._waypoints:
                 lx, ly, _ = self._waypoints[-1]
                 lsx, lsy  = self._map_to_screen(lx, ly)
@@ -1260,7 +1106,6 @@ class RouteEditorWidget(QWidget):
             dy = (event.y() - self._pan_start[1]) * self._view_scale
             self._view_offset[0] -= dx
             self._view_offset[1] -= dy
-            # Ограничиваем смещение
             self._view_offset[0] = max(0, min(self._view_offset[0],
                                               self._map_w - self._canvas.width() * self._view_scale))
             self._view_offset[1] = max(0, min(self._view_offset[1],
@@ -1279,51 +1124,40 @@ class RouteEditorWidget(QWidget):
         factor = 0.85 if event.angleDelta().y() > 0 else 1.18
         new_scale = self._view_scale * factor
 
-        # Ограничиваем зум
         min_scale = min(self._map_w / max(self._canvas.width(), 1),
                         self._map_h / max(self._canvas.height(), 1))
         new_scale = max(min_scale * 0.5, min(new_scale, float(max(self._map_w, self._map_h))))
 
-        # Зум вокруг курсора
         cx, cy = self._screen_to_map(event.x(), event.y())
-        self._view_scale    = new_scale
+        self._view_scale     = new_scale
         self._view_offset[0] = cx - event.x() * new_scale
         self._view_offset[1] = cy - event.y() * new_scale
         self._canvas.update()
 
     def _paint_canvas(self, painter: QPainter, w: int, h: int):
-        """Отрисовка содержимого canvas."""
         painter.fillRect(0, 0, w, h, QColor(C['widget']))
 
         if self._map_pixmap is None:
             painter.setPen(QColor(C['muted']))
             painter.setFont(QFont("Consolas", 9))
-            painter.drawText(
-                0, 0, w, h, Qt.AlignCenter,
-                "Загрузите карту\n(кнопка  🗺  Загрузить карту)"
-            )
+            painter.drawText(0, 0, w, h, Qt.AlignCenter,
+                             "Загрузите карту\n(кнопка  🗺  Загрузить карту)")
             return
 
-        # ── Рисуем миниатюру карты ────────────────────────────
         vis_w = int(w * self._view_scale)
         vis_h = int(h * self._view_scale)
         ox    = int(self._view_offset[0])
         oy    = int(self._view_offset[1])
 
-        src_rect  = (ox, oy, min(vis_w, self._map_w - ox),
-                              min(vis_h, self._map_h - oy))
-        dest_rect = (0, 0, w, h)
+        src_rect = (ox, oy, min(vis_w, self._map_w - ox),
+                             min(vis_h, self._map_h - oy))
 
-        # Вырезаем нужный кусок карты и масштабируем
         cropped = self._map_pixmap.copy(ox, oy, src_rect[2], src_rect[3])
-        scaled  = cropped.scaled(w, h, Qt.IgnoreAspectRatio,
-                                  Qt.SmoothTransformation)
+        scaled  = cropped.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         painter.drawPixmap(0, 0, scaled)
 
-        # ── Тёмный оверлей для читаемости ─────────────────────
         painter.fillRect(0, 0, w, h, QColor(0, 0, 0, 60))
 
-        # ── Линии маршрута ────────────────────────────────────
         if len(self._waypoints) >= 2:
             color = self.CLR_DONE if self._route_done else self.CLR_LINE
             pen   = QPen(color, 2)
@@ -1335,9 +1169,7 @@ class RouteEditorWidget(QWidget):
                 sx1, sy1  = self._map_to_screen(x1, y1)
                 painter.drawLine(int(sx0), int(sy0), int(sx1), int(sy1))
 
-        # ── Линия предпросмотра к курсору ─────────────────────
-        if (self._waypoints and not self._route_done
-                and self._cursor_pos):
+        if self._waypoints and not self._route_done and self._cursor_pos:
             lx, ly, _ = self._waypoints[-1]
             sx0, sy0  = self._map_to_screen(lx, ly)
             sx1, sy1  = self._map_to_screen(*self._cursor_pos)
@@ -1346,7 +1178,6 @@ class RouteEditorWidget(QWidget):
             painter.setPen(pen)
             painter.drawLine(int(sx0), int(sy0), int(sx1), int(sy1))
 
-        # ── Точки маршрута ────────────────────────────────────
         for i, (mx, my, name) in enumerate(self._waypoints):
             sx, sy = self._map_to_screen(mx, my)
             sx, sy = int(sx), int(sy)
@@ -1363,18 +1194,15 @@ class RouteEditorWidget(QWidget):
             painter.drawEllipse(sx - self.WP_RADIUS, sy - self.WP_RADIUS,
                                 self.WP_RADIUS * 2, self.WP_RADIUS * 2)
 
-            # Номер точки
             painter.setPen(QColor("white"))
             painter.setFont(QFont("Consolas", 7, QFont.Bold))
             painter.drawText(sx + self.WP_RADIUS + 2, sy + 4, str(i))
 
-        # ── Информация ────────────────────────────────────────
         painter.setPen(QColor(C['muted']))
         painter.setFont(QFont("Consolas", 8))
         info = f"карта {self._map_w}×{self._map_h}  |  точек: {len(self._waypoints)}"
         painter.drawText(4, h - 4, info)
 
-        # ── Координаты курсора ────────────────────────────────
         if self._cursor_pos:
             cx, cy = self._cursor_pos
             cx = max(0, min(cx, self._map_w))
@@ -1384,8 +1212,6 @@ class RouteEditorWidget(QWidget):
 
 
 class _RouteCanvas(QWidget):
-    """Внутренний холст — делегирует все события в RouteEditorWidget."""
-
     def __init__(self, editor: RouteEditorWidget):
         super().__init__(editor)
         self._editor = editor
@@ -1398,11 +1224,11 @@ class _RouteCanvas(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         self._editor._paint_canvas(painter, self.width(), self.height())
 
-    def mousePressEvent(self, e):      self._editor._mouse_press(e)
-    def mouseReleaseEvent(self, e):    self._editor._mouse_release(e)
-    def mouseMoveEvent(self, e):       self._editor._mouse_move(e)
+    def mousePressEvent(self, e):       self._editor._mouse_press(e)
+    def mouseReleaseEvent(self, e):     self._editor._mouse_release(e)
+    def mouseMoveEvent(self, e):        self._editor._mouse_move(e)
     def mouseDoubleClickEvent(self, e): self._editor._mouse_double_click(e)
-    def wheelEvent(self, e):           self._editor._wheel(e)
+    def wheelEvent(self, e):            self._editor._wheel(e)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1415,7 +1241,7 @@ class _RouteCanvas(QWidget):
 class ParamPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        grp = QGroupBox("Параметры детектора")
+        grp  = QGroupBox("Параметры детектора")
         form = QFormLayout(grp)
         form.setSpacing(5)
 
@@ -1450,8 +1276,8 @@ class ParamPanel(QWidget):
         self.spin_alpha.setValue(0.95)
         self.spin_alpha.setToolTip(
             "Коэффициент забывания фона (EMA).\n"
-            "0.95 = медленная адаптация (стабильное освещение).\n"
-            "0.7  = быстрая адаптация (переменное освещение)."
+            "0.95 = медленная адаптация.\n"
+            "0.7  = быстрая адаптация."
         )
         form.addRow("Забывание α:", self.spin_alpha)
 
@@ -1459,10 +1285,7 @@ class ParamPanel(QWidget):
         self.spin_lr.setRange(1.0, 10.0)
         self.spin_lr.setSingleStep(0.1)
         self.spin_lr.setValue(1.5)
-        self.spin_lr.setToolTip(
-            "Минимальный LR для подтверждения пика.\n"
-            "Фильтрует изменения освещения."
-        )
+        self.spin_lr.setToolTip("Минимальный LR для подтверждения пика.")
         form.addRow("LR фильтр:", self.spin_lr)
 
         self.spin_width = QSpinBox()
@@ -1500,9 +1323,9 @@ class VisualizerWindow(QMainWindow):
         self.resize(1440, 860)
         self.setStyleSheet(STYLESHEET)
 
-        self._thread:     ProcessingThread | None = None
-        self._sim:        FlightSimulator  | None = None
-        self._zone_color  = QColor(C['signal'])
+        self._thread:       ProcessingThread | None = None
+        self._sim:          FlightSimulator  | None = None
+        self._zone_color    = QColor(C['signal'])
         self._last_old_hist = None
         self._last_new_hist = None
 
@@ -1510,15 +1333,12 @@ class VisualizerWindow(QMainWindow):
         self._build_ui()
         self._build_statusbar()
 
-        # Автозапуск демо если указано
         if args and args.demo:
             self._start_demo()
         elif args and args.image:
             self._start_from_image(args.image)
         elif args and args.frames:
             self._start_from_frames(args.frames)
-
-    # ── Тулбар ───────────────────────────────────────────────
 
     def _build_toolbar(self):
         tb = QToolBar("Управление")
@@ -1549,8 +1369,6 @@ class VisualizerWindow(QMainWindow):
         self.act_pause.triggered.connect(self._on_pause)
         self.act_stop.triggered.connect(self._on_stop)
 
-    # ── UI ───────────────────────────────────────────────────
-
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -1558,11 +1376,9 @@ class VisualizerWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
 
-        # ── Левая колонка: видео + параметры + события ────────
         left = QVBoxLayout()
         left.setSpacing(6)
 
-        # Видео
         vg = QGroupBox("КАДР КАМЕРЫ")
         vgl = QVBoxLayout(vg)
         vgl.setContentsMargins(4, 4, 4, 4)
@@ -1571,7 +1387,6 @@ class VisualizerWindow(QMainWindow):
         vgl.addWidget(self.frame_widget)
         left.addWidget(vg)
 
-        # Редактор маршрута
         rg = QGroupBox("МАРШРУТ  (ЛКМ=точка  ПКМ=отмена  2×ЛКМ=готово)")
         rgl = QVBoxLayout(rg)
         rgl.setContentsMargins(4, 4, 4, 4)
@@ -1580,11 +1395,9 @@ class VisualizerWindow(QMainWindow):
         rgl.addWidget(self.route_editor)
         left.addWidget(rg)
 
-        # Параметры
         self.param_panel = ParamPanel()
         left.addWidget(self.param_panel)
 
-        # Список событий
         eg = QGroupBox("ОБНАРУЖЕННЫЕ ПЕРЕХОДЫ")
         egl = QVBoxLayout(eg)
         egl.setContentsMargins(4, 4, 4, 4)
@@ -1600,11 +1413,9 @@ class VisualizerWindow(QMainWindow):
         lw.setFixedWidth(380)
         root.addWidget(lw)
 
-        # ── Правая колонка: графики ────────────────────────────
         right = QVBoxLayout()
         right.setSpacing(6)
 
-        # График сигналов
         sg = QGroupBox("СИГНАЛ ДЕТЕКТОРА  (Бхаттачарья / LR / Порог)")
         sgl = QVBoxLayout(sg)
         sgl.setContentsMargins(4, 4, 4, 4)
@@ -1613,7 +1424,6 @@ class VisualizerWindow(QMainWindow):
         sgl.addWidget(self.signal_plot)
         right.addWidget(sg, stretch=2)
 
-        # Гистограммы
         hrow = QHBoxLayout()
         hrow.setSpacing(6)
 
@@ -1631,7 +1441,6 @@ class VisualizerWindow(QMainWindow):
         hngl.addWidget(self.hist_new)
         hrow.addWidget(hng)
 
-        # Связываем гистограммы — каждая видит другую для расчёта Δ
         self.hist_old.set_pair(self.hist_new)
         self.hist_new.set_pair(self.hist_old)
 
@@ -1639,22 +1448,20 @@ class VisualizerWindow(QMainWindow):
         hw.setLayout(hrow)
         right.addWidget(hw, stretch=1)
 
-        # Матрица расстояний
         mg = QGroupBox("МАТРИЦА РАССТОЯНИЙ БУФЕРА  (синий=похожи  красный=различны)")
         mgl = QHBoxLayout(mg)
         mgl.setContentsMargins(4, 4, 4, 4)
         self.dist_matrix = DistanceMatrixWidget()
         mgl.addWidget(self.dist_matrix)
 
-        # Легенда справа от матрицы
         leg = QVBoxLayout()
         leg.setSpacing(4)
         leg.setContentsMargins(6, 0, 0, 0)
         for txt, color in [
-            ("Синий блок\n= стабильная зона",    C['signal']),
-            ("2 блока + крест\n= настоящий переход", C['event']),
-            ("Хаос\n= шум/ложняк",               C['threshold']),
-            ("Диагональ\n= плавный градиент",     C['muted']),
+            ("Синий блок\n= стабильная зона",        C['signal']),
+            ("2 блока + крест\n= настоящий переход",  C['event']),
+            ("Хаос\n= шум/ложняк",                   C['threshold']),
+            ("Диагональ\n= плавный градиент",         C['muted']),
         ]:
             lbl = QLabel(txt)
             lbl.setStyleSheet(f"color:{color}; font-size:9px;")
@@ -1666,7 +1473,6 @@ class VisualizerWindow(QMainWindow):
 
         right.addWidget(mg, stretch=2)
 
-        # Траектория
         tg = QGroupBox("ТРАЕКТОРИЯ НАД КАРТОЙ")
         tgl = QVBoxLayout(tg)
         tgl.setContentsMargins(4, 4, 4, 4)
@@ -1681,10 +1487,10 @@ class VisualizerWindow(QMainWindow):
     def _build_statusbar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
-        self.lbl_status  = QLabel("Готов")
-        self.lbl_frame   = QLabel("кадр: —")
-        self.lbl_bhat    = QLabel("Бхатт: —")
-        self.lbl_events  = QLabel("событий: 0")
+        self.lbl_status = QLabel("Готов")
+        self.lbl_frame  = QLabel("кадр: —")
+        self.lbl_bhat   = QLabel("Бхатт: —")
+        self.lbl_events = QLabel("событий: 0")
         for lbl in [self.lbl_status, self.lbl_frame,
                     self.lbl_bhat,   self.lbl_events]:
             sb.addPermanentWidget(lbl)
@@ -1692,19 +1498,47 @@ class VisualizerWindow(QMainWindow):
     # ── Запуск ────────────────────────────────────────────────
 
     def _start_demo(self):
-        """Синтетическая карта: три вертикальные полосы."""
-        W, H = 2000, 600
+        """Синтетическая карта: сетка 3×3 из 9 зон."""
+        CELL_W, CELL_H = 700, 700
+        W, H = CELL_W * 3, CELL_H * 3
+
+        # BGR-цвета 9 зон (строки сверху вниз, столбцы слева направо)
+        ZONES = [
+            [ 40, 180,  40],   # поле — ярко-зелёный
+            [ 30,  60, 140],   # водоём — тёмно-синий
+            [100, 200, 240],   # песок — светло-голубой
+            [ 20,  80,  20],   # лес — тёмно-зелёный
+            [100, 100, 100],   # дорога — серый
+            [ 60, 130, 200],   # река — средне-синий
+            [180, 220, 100],   # луг — жёлто-зелёный
+            [ 50,  50, 160],   # крыши — тёмно-красный
+            [200, 200, 200],   # город — светло-серый
+        ]
+
+        rng   = np.random.default_rng(42)
         synth = np.zeros((H, W, 3), dtype=np.uint8)
-        synth[:, :650]     = [80,  200, 180]
-        synth[:, 650:1300] = [30,  100,  30]
-        synth[:, 1300:]    = [100, 110, 120]
-        noise = np.random.randint(0, 20, synth.shape, dtype=np.uint8)
-        synth = np.clip(synth.astype(np.int32) + noise, 0, 255).astype(np.uint8)
+
+        for idx, color in enumerate(ZONES):
+            row = idx // 3
+            col = idx  % 3
+            y0, y1 = row * CELL_H, (row + 1) * CELL_H
+            x0, x1 = col * CELL_W, (col + 1) * CELL_W
+            synth[y0:y1, x0:x1] = color
+            noise = rng.integers(-25, 25, (y1 - y0, x1 - x0, 3), dtype=np.int16)
+            synth[y0:y1, x0:x1] = np.clip(
+                synth[y0:y1, x0:x1].astype(np.int16) + noise, 0, 255
+            ).astype(np.uint8)
+
+        # Тонкие белые границы между ячейками — визуальная помощь
+        for i in range(1, 3):
+            synth[i * CELL_H, :]  = 255   # горизонтальная линия
+            synth[:, i * CELL_W]  = 255   # вертикальная линия
 
         import tempfile
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        cv2.imwrite(self._tmp.name, synth)
-        self._start_from_image(self._tmp.name, title="Демо — синтетическая карта")
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        self._tmp = tmp
+        cv2.imwrite(tmp.name, synth)
+        self._start_from_image(tmp.name, title="Демо — сетка 3×3 (9 зон)")
 
     def _open_image_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1715,9 +1549,7 @@ class VisualizerWindow(QMainWindow):
             self._start_from_image(path)
 
     def _open_frames_dialog(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Папка с кадрами (PNG)"
-        )
+        folder = QFileDialog.getExistingDirectory(self, "Папка с кадрами (PNG)")
         if folder:
             self._start_from_frames(folder)
 
@@ -1734,7 +1566,6 @@ class VisualizerWindow(QMainWindow):
             self.lbl_status.setText(str(e))
             return
 
-        # Загружаем миниатюру карты в редактор маршрута
         self.route_editor.load_map(path)
         self._map_path = path
 
@@ -1765,7 +1596,6 @@ class VisualizerWindow(QMainWindow):
         if self._thread and self._thread.isRunning():
             return
 
-        # Сбрасываем UI
         self.signal_plot.reset()
         self.traj_widget.reset()
         self.dist_matrix.clear()
@@ -1775,14 +1605,10 @@ class VisualizerWindow(QMainWindow):
         params = self.param_panel.get_params()
 
         if self._sim:
-            # Берём маршрут из редактора или дефолтный
             wps = self.route_editor.get_waypoints()
             if not wps:
                 wps = self._sim.make_default_route(n_segments=3)
-                self.lbl_status.setText(
-                    "Маршрут не задан — используется автоматический"
-                )
-            # Передаём waypoints в симулятор через атрибут
+                self.lbl_status.setText("Маршрут не задан — используется автоматический")
             self._sim._user_waypoints = wps
             source = self._sim
         elif hasattr(self, "_frame_paths"):
@@ -1836,8 +1662,7 @@ class VisualizerWindow(QMainWindow):
         lr   = info["lr"]
         thr  = info["threshold"]
 
-        # Цвет зоны по текущему HSV (грубая оценка по средней яркости)
-        hsv_f = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        hsv_f  = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         h_mean = int(hsv_f[:, :, 0].mean())
         s_mean = int(hsv_f[:, :, 1].mean())
         v_mean = int(hsv_f[:, :, 2].mean())
@@ -1845,39 +1670,27 @@ class VisualizerWindow(QMainWindow):
             h_mean * 2, max(s_mean, 80), max(v_mean, 120)
         )
 
-        # Кадр
-        self.frame_widget.set_frame(
-            bgr, fn, info["in_transition"], self._zone_color
-        )
+        self.frame_widget.set_frame(bgr, fn, info["in_transition"], self._zone_color)
 
-        # График
         norm_val = info.get("norm", 0.0)
         self.signal_plot.add_point(bhat, lr, thr, info["is_event"], norm_val)
 
-        # Траектория
         self.traj_widget.add_position(
             info["position_x"], info["position_y"], QColor(self._zone_color)
         )
         if info["is_event"]:
             self.traj_widget.add_event()
 
-        # Матрица расстояний
         if info.get("buf_matrix") is not None:
             self.dist_matrix.update_matrix(
-                info["buf_matrix"],
-                info["buf_m"],
-                info["in_transition"]
+                info["buf_matrix"], info["buf_m"], info["in_transition"]
             )
 
-        # Гистограммы — обновляем каждый кадр
         if info["old_hist"] is not None:
-            self.hist_old.set_histogram(info["old_hist"],
-                                        info.get("old_conf", 0.0))
+            self.hist_old.set_histogram(info["old_hist"], info.get("old_conf", 0.0))
         if info["new_hist"] is not None:
-            self.hist_new.set_histogram(info["new_hist"],
-                                        info.get("new_conf", 0.0))
+            self.hist_new.set_histogram(info["new_hist"], info.get("new_conf", 0.0))
 
-        # Статусбар
         self.lbl_frame.setText(f"кадр: {fn:6d}")
         self.lbl_bhat.setText(f"Бхатт: {bhat:.3f}  |  порог: {thr:.3f}")
 
