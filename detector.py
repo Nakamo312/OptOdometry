@@ -30,23 +30,14 @@ def compute_likelihood_ratio(buffer: StateBuffer, m: int) -> float:
 
     LR ≈ 1  →  новые кадры не отличаются от старых (нет перехода)
     LR >> 1 →  новые кадры объясняются новым распределением гораздо лучше
-
-    Параметры
-    ----------
-    buffer : StateBuffer
-    m      : int  — число "новых" кадров (≥ 2)
-
-    Возвращает
-    ----------
-    float — отношение правдоподобия ≥ 0.
     """
     states = buffer.get_window()
     n      = len(states)
 
     if n < m + 2:
-        return 1.0      # недостаточно данных
+        return 1.0
 
-    m = max(2, min(m, n // 2))     # защита от крайних значений
+    m = max(2, min(m, n // 2))
 
     old_states = states[:n - m]
     new_states = states[n - m:]
@@ -54,20 +45,16 @@ def compute_likelihood_ratio(buffer: StateBuffer, m: int) -> float:
     old_matrix = np.array([s.feature_vector() for s in old_states])
     new_matrix = np.array([s.feature_vector() for s in new_states])
 
-    # Оцениваем оба распределения
     try:
         mu_old, sig_old = estimate_gaussian(old_matrix)
         mu_new, sig_new = estimate_gaussian(new_matrix)
     except ValueError:
         return 1.0
 
-    # Log-правдоподобие новых кадров при обоих распределениях
     lp_old = gaussian_logpdf_batch(new_matrix, mu_old, sig_old).sum()
     lp_new = gaussian_logpdf_batch(new_matrix, mu_new, sig_new).sum()
 
     log_lr = lp_new - lp_old
-
-    # Ограничиваем чтобы избежать числового переполнения
     log_lr = np.clip(log_lr, -500, 500)
     return float(np.exp(log_lr))
 
@@ -75,9 +62,6 @@ def compute_likelihood_ratio(buffer: StateBuffer, m: int) -> float:
 def bhattacharyya_ratio(buffer: StateBuffer, m: int) -> float:
     """
     Расстояние Бхаттачарьи между гистограммами H старой и новой частей буфера.
-
-    Используется как ОСНОВНОЙ сигнал детектора.
-    LR (gaussian) — фильтрует ложные срабатывания.
 
     Возвращает
     ----------
@@ -96,16 +80,104 @@ def bhattacharyya_ratio(buffer: StateBuffer, m: int) -> float:
     old_states = states[:n - m]
     new_states = states[n - m:]
 
-    # Усреднённые гистограммы для каждой группы
     h_old = np.mean([s.histogram() for s in old_states], axis=0).astype(np.float32)
     h_new = np.mean([s.histogram() for s in new_states], axis=0).astype(np.float32)
 
     return float(cv2.compareHist(h_old, h_new, cv2.HISTCMP_BHATTACHARYYA))
 
 
-# ─────────────────────────────────────────────────────────────
-#  ЗАДАЧА 7 — Адаптивный порог (Нейман-Пирсон)
-# ─────────────────────────────────────────────────────────────
+def block_score(buffer: StateBuffer, m: int) -> float:
+    """
+    Структурный сигнал перехода по матрице расстояний буфера.
+
+    Алгоритм
+    --------
+    Делим буфер на старые ([:split]) и новые ([split:]) кадры.
+    Считаем три средних расстояния Бхаттачарьи:
+        cross    = mean(D[i,j])  для i ∈ старые, j ∈ новые
+        intra_old = mean(D[i,j]) для i,j ∈ старые  (i ≠ j)
+        intra_new = mean(D[i,j]) для i,j ∈ новые   (i ≠ j)
+
+    block_score = cross − 0.5 * (intra_old + intra_new)
+
+    Интерпретация
+    -------------
+    0   → однородный буфер (cross ≈ intra, переходов нет)
+    >0  → межгрупповое расстояние больше внутригруппового → есть переход
+    1   → максимальная блочная структура
+
+    Преимущество перед простой Бхаттачарьей
+    ----------------------------------------
+    Устойчив к случаю когда обе зоны похожи по среднему цвету,
+    но каждая внутренне однородна — усреднение в bhattacharyya_ratio
+    в этом случае даёт низкий сигнал, block_score — нет.
+    Также менее чувствителен к завышенному LocalBackground при
+    обратном движении, т.к. нормализуется на внутригрупповой разброс.
+
+    Параметры
+    ----------
+    buffer : StateBuffer
+    m      : int — число "новых" кадров
+
+    Возвращает
+    ----------
+    float ∈ [0, 1]
+    """
+    import cv2
+
+    states = buffer.get_window()
+    n      = len(states)
+
+    if n < m + 2:
+        return 0.0
+
+    m     = max(2, min(m, n // 2))
+    split = n - m
+
+    old = states[:split]
+    new = states[split:]
+
+    def _mean_dist(group_a: list, group_b: list, skip_same: bool = False) -> float:
+        """Среднее попарное расстояние Бхаттачарьи между двумя группами."""
+        vals = []
+        for i, sa in enumerate(group_a):
+            for j, sb in enumerate(group_b):
+                if skip_same and sa is sb:
+                    continue
+                h1 = sa.histogram()
+                h2 = sb.histogram()
+                vals.append(
+                    float(cv2.compareHist(h1, h2, cv2.HISTCMP_BHATTACHARYYA))
+                )
+        return float(np.mean(vals)) if vals else 0.0
+
+    cross     = _mean_dist(old, new, skip_same=False)
+    intra_old = _mean_dist(old, old, skip_same=True)
+    intra_new = _mean_dist(new, new, skip_same=True)
+    intra     = 0.5 * (intra_old + intra_new)
+
+    score = cross - intra
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def combined_signal(buffer: StateBuffer, m: int,
+                    w_bhat: float = 0.4,
+                    w_block: float = 0.6) -> float:
+    """
+    Взвешенная комбинация bhattacharyya_ratio и block_score.
+
+    Параметры
+    ----------
+    w_bhat  : вес простой Бхаттачарьи (быстрая, реагирует на абс. разницу)
+    w_block : вес block_score          (медленнее, структурно устойчивее)
+
+    По умолчанию block_score имеет больший вес, т.к. он устойчивее
+    к асимметрии буфера при смене направления движения.
+    """
+    bhat  = bhattacharyya_ratio(buffer, m)
+    bscor = block_score(buffer, m)
+    return float(w_bhat * bhat + w_block * bscor)
+
 
 # ─────────────────────────────────────────────────────────────
 #  ЗАДАЧА 7 — Адаптивный порог + детектор пиков
@@ -115,22 +187,14 @@ class LocalBackground:
     """
     Скользящая оценка фонового уровня сигнала.
 
-    Использует экспоненциальное скользящее среднее (EMA)
-    с коэффициентом забывания — старые значения постепенно
-    теряют вес. Обновляется только на стабильных кадрах.
-
-    Параметры
-    ----------
-    alpha       : float  — коэффициент забывания ∈ (0,1).
-                           0.95 = медленное забывание (стабильный фон)
-                           0.7  = быстрое забывание (адаптация к изменениям)
-    init_value  : float  — начальное значение фона
+    Использует экспоненциальное скользящее среднее (EMA).
+    Обновляется только на стабильных кадрах.
     """
 
     def __init__(self, alpha: float = 0.95, init_value: float = 0.05):
-        self.alpha       = alpha
-        self._value      = init_value
-        self._n_updates  = 0
+        self.alpha      = alpha
+        self._value     = init_value
+        self._n_updates = 0
 
     def update(self, signal: float, is_stable: bool):
         if is_stable:
@@ -149,27 +213,13 @@ class LocalBackground:
 
 class PeakDetector:
     """
-    Детектор локальных максимумов на сигнале Бхаттачарьи.
+    Детектор локальных максимумов на комбинированном сигнале.
 
     Алгоритм
     --------
     1. Нормализуем сигнал: normalized = signal / background
-       Это инвариантно к абсолютной амплитуде — порог фиксированный.
-
-    2. Ищем пик: normalized > peak_threshold И производная
-       меняет знак + → -  (мы на спуске после максимума).
-
-    3. LR используем как второй фильтр: пик засчитывается только
-       если LR > lr_threshold.
-
-    Параметры
-    ----------
-    peak_threshold  : float  — минимальное отношение сигнал/фон для пика.
-                               2.0 = сигнал должен быть вдвое выше фона.
-    lr_threshold    : float  — минимальный LR для подтверждения.
-    min_peak_width  : int    — минимальная ширина пика в кадрах.
-                               Защита от одиночных шумовых выбросов.
-    forgetting_alpha: float  — коэффициент забывания фона.
+    2. Ищем пик: normalized > peak_threshold И производная + → -
+    3. LR используем как второй фильтр
     """
 
     def __init__(self,
@@ -178,30 +228,28 @@ class PeakDetector:
                  min_peak_width:   int   = 3,
                  forgetting_alpha: float = 0.95):
 
-        self.peak_threshold   = peak_threshold
-        self.lr_threshold     = lr_threshold
-        self.min_peak_width   = min_peak_width
+        self.peak_threshold = peak_threshold
+        self.lr_threshold   = lr_threshold
+        self.min_peak_width = min_peak_width
 
         self._bg        = LocalBackground(alpha=forgetting_alpha)
-        self._prev_norm = 0.0   # нормализованный сигнал на прошлом шаге
-        self._prev_bhat = 0.0   # сырой сигнал на прошлом шаге
+        self._prev_norm = 0.0
+        self._prev_bhat = 0.0
 
-        # Отслеживание текущего пика
         self._in_peak       = False
         self._peak_start    = -1
         self._peak_max_norm = 0.0
         self._peak_max_bhat = 0.0
         self._peak_width    = 0
 
-        # История для визуализации
         self.norm_history:       list[float] = []
         self.background_history: list[float] = []
         self.threshold_history:  list[float] = []
 
     def update(self,
-               bhat:       float,
-               lr:         float,
-               is_stable:  bool,
+               bhat:         float,
+               lr:           float,
+               is_stable:    bool,
                frame_number: int
                ) -> tuple[bool, bool]:
         """
@@ -210,20 +258,11 @@ class PeakDetector:
         Возвращает
         ----------
         (in_peak, peak_confirmed)
-
-        in_peak         : True пока нормализованный сигнал выше порога
-        peak_confirmed  : True в момент подтверждения пика
-                          (задний фронт + достаточная ширина + LR)
         """
-        # 1. Обновляем фон
         self._bg.update(bhat, is_stable)
-        bg = max(self._bg.get(), 1e-6)
-
-        # 2. Нормализованный сигнал
+        bg   = max(self._bg.get(), 1e-6)
         norm = bhat / bg
-
-        # 3. Порог в нормализованном пространстве
-        thr = self.peak_threshold
+        thr  = self.peak_threshold
 
         above = (norm > thr) and (lr > self.lr_threshold)
 
@@ -231,7 +270,6 @@ class PeakDetector:
         peak_confirmed = False
 
         if above and not self._in_peak:
-            # Передний фронт пика
             self._in_peak       = True
             self._peak_start    = frame_number
             self._peak_max_norm = norm
@@ -239,14 +277,12 @@ class PeakDetector:
             self._peak_width    = 1
 
         elif above and self._in_peak:
-            # Внутри пика — обновляем максимум
-            self._peak_width   += 1
+            self._peak_width += 1
             if norm > self._peak_max_norm:
                 self._peak_max_norm = norm
                 self._peak_max_bhat = bhat
 
         elif not above and self._in_peak:
-            # Задний фронт — проверяем валидность пика
             if self._peak_width >= self.min_peak_width:
                 peak_confirmed = True
             self._in_peak    = False
@@ -254,7 +290,6 @@ class PeakDetector:
 
         in_peak = self._in_peak
 
-        # 4. История
         self.norm_history.append(norm)
         self.background_history.append(bg)
         self.threshold_history.append(thr)
@@ -265,7 +300,6 @@ class PeakDetector:
         return in_peak, peak_confirmed
 
     def get_threshold_abs(self) -> float:
-        """Порог в абсолютных единицах Бхаттачарьи (для визуализации)."""
         return self._bg.get() * self.peak_threshold
 
     def reset(self):
@@ -289,12 +323,8 @@ class PeakDetector:
         )
 
 
-# Оставляем AdaptiveThreshold как алиас для обратной совместимости
 class AdaptiveThreshold:
-    """
-    Устаревший класс — оставлен для совместимости.
-    Новый код использует PeakDetector.
-    """
+    """Устаревший класс — оставлен для совместимости."""
     def __init__(self, false_alarm_rate=0.05, min_history=30,
                  default_threshold=0.3):
         self.false_alarm_rate  = false_alarm_rate
@@ -324,21 +354,7 @@ class AdaptiveThreshold:
 
 @dataclass
 class TransitionEvent:
-    """
-    Событие обнаруженного перехода между зонами.
-
-    Поля
-    ----
-    frame_enter  : int    — номер кадра входа в переход (LR > порога)
-    frame_exit   : int    — номер кадра выхода (LR упал ниже порога)
-    frame_center : int    — середина перехода (наилучшая оценка границы)
-    bhattacharyya_max : float  — максимальное значение сигнала
-    lr_max       : float  — максимальное значение LR
-    confidence   : float  — уверенность ∈ [0, 1]
-    old_state    : Optional[SurfaceState]  — представитель старой зоны
-    new_state    : Optional[SurfaceState]  — представитель новой зоны
-    m_used       : int    — значение M при обнаружении
-    """
+    """Событие обнаруженного перехода между зонами."""
     frame_enter:       int
     frame_exit:        int   = -1
     frame_center:      int   = -1
@@ -350,7 +366,6 @@ class TransitionEvent:
     m_used:            int   = 0
 
     def finalize(self, frame_exit: int):
-        """Зафиксировать выход из зоны перехода."""
         self.frame_exit   = frame_exit
         self.frame_center = (self.frame_enter + frame_exit) // 2
 
@@ -371,23 +386,21 @@ class TransitionDetector:
     """
     Детектор переходов между визуально различимыми зонами.
 
-    Архитектура (новая)
-    -------------------
-    1. Основной сигнал  — Бхаттачарья между взвешенными гистограммами H
-    2. Нормализация     — сигнал / локальный фон (EMA с забыванием)
-       Инвариантна к абсолютной амплитуде → нет проблемы консервативного порога
-    3. Детектор пиков   — срабатывает на локальном максимуме нормализованного сигнала
+    Архитектура
+    -----------
+    1. Основной сигнал  — combined_signal():
+         0.4 × Бхаттачарья (усреднённые гистограммы)
+       + 0.6 × block_score  (структура матрицы расстояний)
+    2. Нормализация     — сигнал / локальный фон (EMA)
+    3. Детектор пиков   — срабатывает на локальном максимуме
     4. Фильтр LR        — подтверждает что пик не шум освещения
 
-    Параметры
-    ----------
-    window_size      : int    — размер скользящего окна буфера
-    peak_threshold   : float  — минимальное отношение сигнал/фон (например 2.0)
-    lr_filter_thresh : float  — минимальный LR для подтверждения пика
-    min_peak_width   : int    — минимальная ширина пика в кадрах
-    forgetting_alpha : float  — коэффициент забывания фона (0.9-0.98)
-    min_m            : int    — минимальный M для расчёта сигналов
-    stability_thresh : float  — порог стабильности буфера
+    Параметры block_score
+    ---------------------
+    w_bhat  : float — вес простой Бхаттачарьи в combined_signal (по умолч. 0.4)
+    w_block : float — вес block_score в combined_signal (по умолч. 0.6)
+    block_every : int — считать block_score каждые N кадров (по умолч. 1)
+                        увеличьте до 2-3 если производительность критична
     """
 
     def __init__(self,
@@ -398,13 +411,21 @@ class TransitionDetector:
                  forgetting_alpha: float = 0.95,
                  min_m:            int   = 5,
                  stability_thresh: float = 0.05,
-                 # Обратная совместимость со старыми параметрами
+                 w_bhat:           float = 0.4,
+                 w_block:          float = 0.6,
+                 block_every:      int   = 1,
+                 # обратная совместимость
                  false_alarm_rate: float = None,
                  **kwargs):
 
         self.window_size      = window_size
         self.min_m            = min_m
         self.lr_filter_thresh = lr_filter_thresh
+        self.w_bhat           = w_bhat
+        self.w_block          = w_block
+        self.block_every      = block_every
+        self._frame_count     = 0
+        self._last_block      = 0.0   # кэш последнего block_score
 
         self._buffer = StateBuffer(
             window_size=window_size,
@@ -419,16 +440,17 @@ class TransitionDetector:
             forgetting_alpha=forgetting_alpha,
         )
 
-        # Состояние конечного автомата
         self._in_transition     = False
         self._current_event:    Optional[TransitionEvent] = None
         self._completed_events: List[TransitionEvent]     = []
 
-        # История для визуализации
-        self.signal_history:    List[float] = []   # сырая Бхаттачарья
+        self.signal_history:    List[float] = []
         self.lr_history:        List[float] = []
-        self.threshold_history: List[float] = []   # порог в абс. единицах
-        self.norm_history:      List[float] = []   # нормализованный сигнал
+        self.threshold_history: List[float] = []
+        self.norm_history:      List[float] = []
+        # дополнительные истории для диагностики
+        self.bhat_raw_history:  List[float] = []
+        self.block_history:     List[float] = []
 
     # ── Главный метод ─────────────────────────────────────────
 
@@ -437,10 +459,10 @@ class TransitionDetector:
                       frame_number: int) -> Optional[TransitionEvent]:
         """
         Обработать один HSV кадр.
-
-        Возвращает TransitionEvent в момент подтверждения пика,
-        иначе None.
+        Возвращает TransitionEvent в момент подтверждения пика, иначе None.
         """
+        self._frame_count += 1
+
         # 1. Состояние → буфер
         state = SurfaceState(hsv_frame, frame_number=frame_number)
         self._buffer.add_state(state)
@@ -451,45 +473,54 @@ class TransitionDetector:
             self.lr_history.append(1.0)
             self.threshold_history.append(self._peak.get_threshold_abs())
             self.norm_history.append(0.0)
+            self.bhat_raw_history.append(0.0)
+            self.block_history.append(0.0)
             return None
 
         # 3. Динамический M
         m = self._buffer.dynamic_m(min_m=self.min_m)
 
         # 4. Сигналы
-        bhat = bhattacharyya_ratio(self._buffer, m)
-        lr   = compute_likelihood_ratio(self._buffer, m)
+        bhat_raw = bhattacharyya_ratio(self._buffer, m)
+
+        # block_score считаем каждые block_every кадров (кэшируем)
+        if self._frame_count % self.block_every == 0:
+            self._last_block = block_score(self._buffer, m)
+        bscor = self._last_block
+
+        # Комбинированный сигнал
+        sig = float(self.w_bhat * bhat_raw + self.w_block * bscor)
+
+        lr  = compute_likelihood_ratio(self._buffer, m)
 
         # 5. Стабильность буфера
         is_stable = self._buffer.is_stable()
 
-        # 6. Детектор пиков
+        # 6. Детектор пиков (работает на combined signal)
         in_peak, peak_confirmed = self._peak.update(
-            bhat=bhat,
+            bhat=sig,
             lr=lr,
             is_stable=is_stable,
             frame_number=frame_number
         )
 
-        # 7. Синхронизируем флаг перехода с состоянием пика
+        # 7. Конечный автомат переходов
         completed_event = None
 
         if in_peak and not self._in_transition:
-            # Передний фронт
             self._in_transition = True
             old_states = self._buffer.get_first_half()
             self._current_event = TransitionEvent(
                 frame_enter=frame_number,
-                bhattacharyya_max=bhat,
+                bhattacharyya_max=sig,
                 lr_max=lr,
                 old_state=old_states[-1] if old_states else None,
                 m_used=m
             )
 
         elif in_peak and self._in_transition:
-            # Внутри пика — обновляем максимумы
-            if bhat > self._current_event.bhattacharyya_max:
-                self._current_event.bhattacharyya_max = bhat
+            if sig > self._current_event.bhattacharyya_max:
+                self._current_event.bhattacharyya_max = sig
             if lr > self._current_event.lr_max:
                 self._current_event.lr_max = lr
             new_states = self._buffer.get_last_half()
@@ -498,7 +529,6 @@ class TransitionDetector:
             )
 
         elif peak_confirmed and self._in_transition:
-            # Пик подтверждён — фиксируем событие
             self._current_event.finalize(frame_exit=frame_number)
             self._current_event.confidence = self._compute_confidence(
                 self._current_event
@@ -509,41 +539,32 @@ class TransitionDetector:
             self._in_transition = False
 
         elif not in_peak and self._in_transition and not peak_confirmed:
-            # Пик слишком короткий — сбрасываем без события
             self._current_event = None
             self._in_transition = False
 
-        # 8. История для визуализации
-        self.signal_history.append(bhat)
+        # 8. История
+        self.signal_history.append(sig)
         self.lr_history.append(lr)
         self.threshold_history.append(self._peak.get_threshold_abs())
         self.norm_history.append(
             self._peak.norm_history[-1] if self._peak.norm_history else 0.0
         )
+        self.bhat_raw_history.append(bhat_raw)
+        self.block_history.append(bscor)
 
         return completed_event
 
     # ── Вспомогательные ───────────────────────────────────────
 
     def _compute_confidence(self, event: TransitionEvent) -> float:
-        """
-        Уверенность ∈ [0,1].
-        Считаем по нормализованному максимуму пика —
-        инвариантно к абсолютной амплитуде.
-        """
-        bg = max(self._peak._bg.get(), 1e-6)
+        bg       = max(self._peak._bg.get(), 1e-6)
         norm_max = event.bhattacharyya_max / bg
-
-        # Нормализуем относительно порога: 1.0 = ровно на пороге
-        rel = (norm_max - self._peak.peak_threshold) / max(
+        rel      = (norm_max - self._peak.peak_threshold) / max(
             self._peak.peak_threshold, 1e-6
         )
         confidence = float(np.clip(rel, 0.0, 1.0))
-
-        # Штраф за слишком длинный переход
-        duration = max(event.frame_exit - event.frame_enter, 1)
+        duration   = max(event.frame_exit - event.frame_enter, 1)
         duration_penalty = 1.0 / (1.0 + 0.05 * max(duration - 15, 0))
-
         return float(np.clip(confidence * duration_penalty, 0.0, 1.0))
 
     def get_completed_events(self) -> List[TransitionEvent]:
@@ -559,6 +580,10 @@ class TransitionDetector:
         self.lr_history.clear()
         self.threshold_history.clear()
         self.norm_history.clear()
+        self.bhat_raw_history.clear()
+        self.block_history.clear()
+        self._frame_count  = 0
+        self._last_block   = 0.0
 
     def __repr__(self):
         return (
@@ -587,9 +612,10 @@ if __name__ == "__main__":
 
     detector = TransitionDetector(
         window_size=30,
-        false_alarm_rate=0.05,
         min_m=5,
-        lr_filter_thresh=1.2
+        lr_filter_thresh=1.2,
+        w_bhat=0.4,
+        w_block=0.6,
     )
 
     print("=" * 60)
@@ -598,7 +624,6 @@ if __name__ == "__main__":
     print("  Зоны: [Поле x60] → [Лес x60] → [Дорога x60]")
     print()
 
-    # Три зоны
     zones = [
         ([180, 200,  80], 60, "Поле"),
         ([30,  100,  30], 60, "Лес"),
@@ -610,7 +635,7 @@ if __name__ == "__main__":
 
     for rgb, count, name in zones:
         for _ in range(count):
-            hsv = make_hsv_frame(rgb, noise=8)
+            hsv   = make_hsv_frame(rgb, noise=8)
             event = detector.process_frame(hsv, frame_num)
             if event:
                 events.append(event)
@@ -621,7 +646,6 @@ if __name__ == "__main__":
     print(f"  Всего событий: {len(events)}  (ожидается 2)")
     print(f"  {detector}")
 
-    # Переходы должны быть около кадров 60 и 120
     if len(events) >= 1:
         print(f"\n  Переход 1: центр кадра {events[0].frame_center} "
               f"(ожидается ~60, уверенность {events[0].confidence:.2f})")
@@ -629,21 +653,28 @@ if __name__ == "__main__":
         print(f"  Переход 2: центр кадра {events[1].frame_center} "
               f"(ожидается ~120, уверенность {events[1].confidence:.2f})")
 
+    # Диагностика: сравниваем bhat_raw и block_score
+    n = len(detector.bhat_raw_history)
+    if n > 0:
+        print(f"\n  Диагностика сигналов:")
+        print(f"    bhat_raw  max={max(detector.bhat_raw_history):.3f}  "
+              f"mean={np.mean(detector.bhat_raw_history):.3f}")
+        print(f"    block     max={max(detector.block_history):.3f}  "
+              f"mean={np.mean(detector.block_history):.3f}")
+        print(f"    combined  max={max(detector.signal_history):.3f}  "
+              f"mean={np.mean(detector.signal_history):.3f}")
+
     print()
     print("=" * 60)
-    print("ТЕСТ: Стабильный сигнал — LR ≈ 1 (нет переходов)")
+    print("ТЕСТ: Стабильный сигнал — нет переходов")
     print("=" * 60)
-    det2 = TransitionDetector(window_size=20)
+    det2 = TransitionDetector(window_size=20, w_bhat=0.4, w_block=0.6)
     for i in range(60):
         hsv = make_hsv_frame([180, 200, 80], noise=5)
-        e = det2.process_frame(hsv, i)
+        e   = det2.process_frame(hsv, i)
         if e:
             print(f"  ЛОЖНАЯ ТРЕВОГА на кадре {i}!")
 
-    lr_vals = [v for v in det2.lr_history if v != 1.0]
-    if lr_vals:
-        print(f"  LR: min={min(lr_vals):.3f}, max={max(lr_vals):.3f}, "
-              f"mean={np.mean(lr_vals):.3f}")
     print(f"  Событий: {len(det2.get_completed_events())}  (ожидается 0)")
     print()
     print("Все тесты пройдены ✓")
