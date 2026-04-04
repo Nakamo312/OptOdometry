@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import cv2
 import numpy as np
@@ -61,25 +61,58 @@ def colorize_segments(segment_image: np.ndarray) -> np.ndarray:
     return color
 
 
-def draw_boundaries(base_bgr: np.ndarray, output) -> np.ndarray:
+def draw_corridor_overlay(full_bgr: np.ndarray, corridor_bgr: np.ndarray) -> np.ndarray:
+    img = full_bgr.copy()
+    h, w = img.shape[:2]
+    ch, cw = corridor_bgr.shape[:2]
+
+    x0 = (w - cw) // 2
+    x1 = x0 + cw
+    y0 = int(round(h * 0.05))
+    y1 = y0 + ch
+
+    cv2.rectangle(img, (x0, y0), (x1, y1), (80, 220, 255), 2)
+    cv2.line(img, ((x0 + x1) // 2, y0), ((x0 + x1) // 2, y1), (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(
+        img,
+        "corridor ROI",
+        (x0 + 8, max(18, y0 - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (80, 220, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    return img
+
+
+def draw_boundaries(base_bgr: np.ndarray, output, highlight_best: bool = True) -> np.ndarray:
     img = base_bgr.copy()
-    for boundary in output.boundaries:
+    best_track_id = None if output.best_track is None else output.best_track.track_id
+
+    for idx, boundary in enumerate(output.boundaries):
+        is_selected = highlight_best and idx == 0 and output.measurement is not None
         pts = boundary.points.astype(np.int32)
         if len(pts) > 1:
             for i in range(len(pts) - 1):
                 p0 = tuple(pts[i])
                 p1 = tuple(pts[i + 1])
-                cv2.line(img, p0, p1, (0, 255, 255), 1, cv2.LINE_AA)
+                color = (220, 220, 220) if not is_selected else (0, 255, 255)
+                thickness = 1 if not is_selected else 2
+                cv2.line(img, p0, p1, color, thickness, cv2.LINE_AA)
         if boundary.geometry is not None:
             px, py = boundary.geometry.point.astype(np.int32)
-            cv2.circle(img, (int(px), int(py)), 3, (0, 0, 255), -1)
+            color = (0, 140, 255) if not is_selected else (0, 0, 255)
+            radius = 3 if not is_selected else 5
+            cv2.circle(img, (int(px), int(py)), radius, color, -1)
 
     if output.measurement is not None:
         px, py = output.measurement.geometry.point.astype(np.int32)
+        cv2.line(img, (0, int(py)), (img.shape[1] - 1, int(py)), (255, 255, 255), 1, cv2.LINE_AA)
         cv2.circle(img, (int(px), int(py)), 6, (255, 255, 255), 2)
         cv2.putText(
             img,
-            f"u={output.measurement.u_cross:.1f}, phi={np.degrees(output.measurement.phi_cross):.1f}",
+            f"selected boundary | u={output.measurement.u_cross:.1f}, phi={np.degrees(output.measurement.phi_cross):.1f}",
             (8, 18),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
@@ -87,6 +120,37 @@ def draw_boundaries(base_bgr: np.ndarray, output) -> np.ndarray:
             1,
             cv2.LINE_AA,
         )
+        if best_track_id is not None:
+            cv2.putText(
+                img,
+                f"track #{best_track_id}",
+                (8, 38),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+    return img
+
+
+def draw_selected_boundary_only(corridor_bgr: np.ndarray, output) -> np.ndarray:
+    img = corridor_bgr.copy()
+    img[:] = (20, 24, 32)
+    h, w = img.shape[:2]
+    cv2.line(img, (w // 2, 0), (w // 2, h - 1), (100, 100, 100), 1, cv2.LINE_AA)
+    cv2.line(img, (0, h // 2), (w - 1, h // 2), (100, 100, 100), 1, cv2.LINE_AA)
+
+    if output.measurement is not None:
+        px, py = output.measurement.geometry.point.astype(np.int32)
+        tangent = output.measurement.geometry.tangent.astype(np.float32)
+        p0 = (int(px - tangent[0] * 60), int(py - tangent[1] * 60))
+        p1 = (int(px + tangent[0] * 60), int(py + tangent[1] * 60))
+        cv2.line(img, p0, p1, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.circle(img, (int(px), int(py)), 6, (255, 255, 255), 2)
+        cv2.putText(img, "selected track geometry", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    else:
+        cv2.putText(img, "no confirmed measurement", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
     return img
 
 
@@ -95,9 +159,11 @@ class SequenceItem:
     frame_number: int
     heading_deg: float
     full_bgr: np.ndarray
+    full_overlay_bgr: np.ndarray
     corridor_bgr: np.ndarray
     segments_bgr: np.ndarray
     boundaries_bgr: np.ndarray
+    selected_bgr: np.ndarray
     output: object
     meta: object
 
@@ -143,15 +209,19 @@ def build_demo_sequence(max_frames: int = 160) -> tuple[List[SequenceItem], dict
             corridor_bgr = cv2.cvtColor(output.corridor_frame, cv2.COLOR_HSV2BGR)
             segments_bgr = colorize_segments(output.spectral.segment_image)
             boundaries_bgr = draw_boundaries(segments_bgr, output)
+            full_overlay_bgr = draw_corridor_overlay(aligned_bgr, corridor_bgr)
+            selected_bgr = draw_selected_boundary_only(corridor_bgr, output)
 
             items.append(
                 SequenceItem(
                     frame_number=meta.frame_number,
                     heading_deg=heading_deg,
                     full_bgr=aligned_bgr,
+                    full_overlay_bgr=full_overlay_bgr,
                     corridor_bgr=corridor_bgr,
                     segments_bgr=segments_bgr,
                     boundaries_bgr=boundaries_bgr,
+                    selected_bgr=selected_bgr,
                     output=output,
                     meta=meta,
                 )
@@ -204,14 +274,16 @@ class MainWindow(QMainWindow):
         root.addLayout(controls)
 
         grid = QGridLayout()
-        self.frame_pane = ImagePane("Aligned Frame")
+        self.frame_pane = ImagePane("Aligned Frame + Corridor")
         self.corridor_pane = ImagePane("Corridor")
         self.segment_pane = ImagePane("Segments")
         self.boundary_pane = ImagePane("Boundaries")
-        grid.addWidget(self._wrap("Aligned Frame", self.frame_pane), 0, 0)
+        self.selected_pane = ImagePane("Selected Boundary")
+        grid.addWidget(self._wrap("Aligned Frame + Corridor", self.frame_pane), 0, 0)
         grid.addWidget(self._wrap("Corridor", self.corridor_pane), 0, 1)
         grid.addWidget(self._wrap("Spectral Segments", self.segment_pane), 1, 0)
         grid.addWidget(self._wrap("Boundaries / Measurement", self.boundary_pane), 1, 1)
+        grid.addWidget(self._wrap("Selected Boundary Geometry", self.selected_pane), 2, 0, 1, 2)
         root.addLayout(grid, stretch=1)
 
         bottom = QHBoxLayout()
@@ -221,8 +293,12 @@ class MainWindow(QMainWindow):
         self.summary_box = QTextEdit()
         self.summary_box.setReadOnly(True)
         self.summary_box.setStyleSheet("background:#11151c; color:#e6edf3; border:1px solid #394150;")
+        self.legend_box = QTextEdit()
+        self.legend_box.setReadOnly(True)
+        self.legend_box.setStyleSheet("background:#11151c; color:#e6edf3; border:1px solid #394150;")
         bottom.addWidget(self._wrap("Current Frame", self.info), 1)
         bottom.addWidget(self._wrap("Metrics Summary", self.summary_box), 1)
+        bottom.addWidget(self._wrap("Legend", self.legend_box), 1)
         root.addLayout(bottom)
 
         self.timer = QTimer(self)
@@ -272,10 +348,11 @@ class MainWindow(QMainWindow):
         if not self.items:
             return
         item = self.items[self.current_index]
-        self.frame_pane.set_image(item.full_bgr)
+        self.frame_pane.set_image(item.full_overlay_bgr)
         self.corridor_pane.set_image(item.corridor_bgr)
         self.segment_pane.set_image(item.segments_bgr)
         self.boundary_pane.set_image(item.boundaries_bgr)
+        self.selected_pane.set_image(item.selected_bgr)
 
         measurement = item.output.measurement
         best_track = item.output.best_track
@@ -288,15 +365,35 @@ class MainWindow(QMainWindow):
                     f"boundaries detected: {len(item.output.boundaries)}",
                     f"best_track: {None if best_track is None else best_track.track_id}",
                     f"track_hits: {0 if best_track is None else best_track.hits}",
-                    f"measurement_u: {None if measurement is None else round(measurement.u_cross, 2)}",
+                    f"measurement_u: {None if measurement is None else round(measurement.u_cross, 2)} px",
                     f"measurement_phi_deg: {None if measurement is None else round(np.degrees(measurement.phi_cross), 2)}",
                     f"measurement_conf: {None if measurement is None else round(measurement.confidence, 3)}",
+                    "",
+                    "How to read the panes:",
+                    "1. Top-left: full aligned frame with corridor ROI box.",
+                    "2. Top-right: only the corridor crop used by the algorithm.",
+                    "3. Middle-left: spectral segmentation of that corridor.",
+                    "4. Middle-right: all detected boundaries, selected one is bright yellow.",
+                    "5. Bottom image: only the chosen boundary geometry and crossing point.",
                 ]
             )
         )
 
         self.summary_box.setPlainText(
             "\n".join(f"{key}: {value:.4f}" for key, value in self.summary.items())
+        )
+        self.legend_box.setPlainText(
+            "\n".join(
+                [
+                    "White vertical line in full frame: center of corridor.",
+                    "Blue rectangle: corridor ROI passed to the algorithm.",
+                    "Segment colors: spectral clusters inside corridor.",
+                    "Gray boundaries: raw boundary candidates.",
+                    "Yellow boundary: selected candidate used for tracking/measurement.",
+                    "Red/white circle: crossing point on the selected boundary.",
+                    "Bottom pane shows only the chosen geometry, without segment clutter.",
+                ]
+            )
         )
 
 
