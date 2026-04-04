@@ -53,8 +53,8 @@ def fit_boundary_candidate(
     pts = points[np.argsort(points[:, 1])]
     ys = pts[:, 1]
     xs = pts[:, 0]
-    order = 1 if len(np.unique(ys)) < 3 else 2
-    coeffs = np.polyfit(ys, xs, deg=order).astype(np.float32)
+    # Для corridor baseline предпочитаем прямую модель.
+    coeffs = np.polyfit(ys, xs, deg=1).astype(np.float32)
     sample_y = np.linspace(float(ys.min()), float(ys.max()), num=max(16, len(np.unique(ys))))
     sample_x = np.polyval(coeffs, sample_y).astype(np.float32)
     curve_points = np.column_stack([sample_x, sample_y]).astype(np.float32)
@@ -63,7 +63,7 @@ def fit_boundary_candidate(
     curve_length = float(np.linalg.norm(diffs, axis=1).sum()) if len(diffs) > 0 else 0.0
     candidate = BoundaryCandidate(
         frame_number=frame_number,
-        model_type="line" if order == 1 else "poly2",
+        model_type="line",
         curve_points=curve_points,
         model_params=coeffs,
         score=float(len(points)),
@@ -92,6 +92,21 @@ def fit_boundary_candidate(
     return candidate, geometry
 
 
+def _crosses_center(geometry: BoundaryCrossingGeometry, width: int, tolerance_ratio: float = 0.35) -> bool:
+    center_x = width * 0.5
+    tolerance = width * tolerance_ratio
+    return abs(geometry.u_cross - center_x) <= tolerance
+
+
+def _line_verticality(geometry: BoundaryCrossingGeometry) -> float:
+    """
+    1.0 = вертикальная граница, 0.0 = горизонтальная.
+    Для synthetic demo именно это и нужно.
+    """
+    tangent = geometry.tangent.astype(np.float32)
+    return float(abs(tangent[1]))
+
+
 def extract_segment_boundaries(
     segment_image: np.ndarray,
     frame_number: int,
@@ -104,9 +119,10 @@ def extract_segment_boundaries(
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     boundaries: List[SegmentBoundary] = []
+    h, w = segment_image.shape
     for component_id in range(1, num_labels):
         area = int(stats[component_id, cv2.CC_STAT_AREA])
-        if area < 12:
+        if area < max(12, int(0.10 * h)):
             continue
         comp_mask = np.where(labels == component_id, 255, 0).astype(np.uint8)
         pts = boundary_points(comp_mask)
@@ -116,6 +132,23 @@ def extract_segment_boundaries(
             roi_id=roi_id,
             crossing_y=crossing_y,
         )
+        if candidate is None or geometry is None:
+            continue
+
+        ys = pts[:, 1] if len(pts) else np.array([], dtype=np.float32)
+        vertical_coverage = 0.0 if ys.size == 0 else float((ys.max() - ys.min()) / max(h, 1))
+        if vertical_coverage < 0.45:
+            continue
+        if not _crosses_center(geometry, width=w):
+            continue
+
+        straight_score = _line_verticality(geometry)
+        total_score = (
+            1.2 * float(area)
+            + 120.0 * vertical_coverage
+            + 80.0 * straight_score
+            - 2.0 * abs(geometry.u_cross - w * 0.5)
+        )
         boundaries.append(
             SegmentBoundary(
                 label_a=-1,
@@ -124,8 +157,8 @@ def extract_segment_boundaries(
                 points=pts,
                 candidate=candidate,
                 geometry=geometry,
-                score=float(area),
+                score=float(total_score),
             )
         )
     boundaries.sort(key=lambda item: item.score, reverse=True)
-    return boundaries
+    return boundaries[:3]
