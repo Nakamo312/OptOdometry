@@ -98,7 +98,8 @@ def evaluate_sequence() -> dict:
         )
         pipeline = SpectralCorridorPipeline(
             PipelineConfig(
-                cell_size=12,
+                target_regions=24,
+                compactness=0.30,
                 n_clusters=3,
             )
         )

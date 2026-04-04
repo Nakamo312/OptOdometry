@@ -10,7 +10,7 @@ import numpy as np
 
 from boundaries import SegmentBoundary, extract_segment_boundaries
 from corridor import MotionCorridorSpec, extract_motion_corridor
-from graph import RegionGraph, build_region_grid, build_similarity_graph
+from graph import RegionGraph, build_region_superpixels, build_similarity_graph
 from measurement import BoundaryMeasurement, TrackedBoundary
 from metrics import PipelineMetrics
 from spectral import SpectralResult, spectral_cluster
@@ -21,7 +21,8 @@ from tracking import BoundaryTracker, BoundaryTrackingConfig
 class PipelineConfig:
     corridor: MotionCorridorSpec = field(default_factory=MotionCorridorSpec)
     tracking: BoundaryTrackingConfig = field(default_factory=BoundaryTrackingConfig)
-    cell_size: int = 16
+    target_regions: int = 24
+    compactness: float = 0.35
     n_clusters: int = 3
     sigma_color: float = 0.35
     sigma_space: float = 0.20
@@ -59,7 +60,11 @@ class SpectralCorridorPipeline:
             self.config.corridor,
             heading_deg=heading_deg,
         )
-        region_graph = build_region_grid(corridor_frame, cell_size=self.config.cell_size)
+        region_graph = build_region_superpixels(
+            corridor_frame,
+            target_regions=self.config.target_regions,
+            compactness=self.config.compactness,
+        )
         region_graph = build_similarity_graph(
             region_graph,
             sigma_color=self.config.sigma_color,

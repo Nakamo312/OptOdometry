@@ -175,7 +175,13 @@ def build_demo_sequence(waypoints=None, max_frames: int = 160) -> tuple[List[Seq
             shake_pixels=1.5,
             output_format="hsv",
         )
-        pipeline = SpectralCorridorPipeline(PipelineConfig(cell_size=12, n_clusters=3))
+        pipeline = SpectralCorridorPipeline(
+            PipelineConfig(
+                target_regions=24,
+                compactness=0.30,
+                n_clusters=3,
+            )
+        )
         route = waypoints or default_demo_route()
 
         items: List[SequenceItem] = []
