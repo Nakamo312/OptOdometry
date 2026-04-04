@@ -158,7 +158,7 @@ class SequenceItem:
     meta: object
 
 
-def build_demo_sequence(max_frames: int = 160) -> tuple[List[SequenceItem], dict]:
+def build_demo_sequence(waypoints=None, max_frames: int = 160) -> tuple[List[SequenceItem], dict]:
     np.random.seed(7)
     tmp_path = None
     try:
@@ -176,7 +176,7 @@ def build_demo_sequence(max_frames: int = 160) -> tuple[List[SequenceItem], dict
             output_format="hsv",
         )
         pipeline = SpectralCorridorPipeline(PipelineConfig(cell_size=12, n_clusters=3))
-        route = default_demo_route()
+        route = waypoints or default_demo_route()
 
         items: List[SequenceItem] = []
         for hsv_frame, meta in sim.fly(route, speed_pix_per_frame=10.0):
@@ -486,6 +486,17 @@ class EventListWidget(QListWidget):
         self.scrollToBottom()
 
 
+class RouteListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFont(QFont("Consolas", 9))
+
+    def set_waypoints(self, waypoints):
+        self.clear()
+        for i, wp in enumerate(waypoints):
+            self.addItem(QListWidgetItem(f"{i:02d} | {wp.name or 'wp'} | x={wp.x:.1f} y={wp.y:.1f}"))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -493,7 +504,8 @@ class MainWindow(QMainWindow):
         self.resize(1560, 980)
         self.setStyleSheet(STYLESHEET)
 
-        self.items, self.summary = build_demo_sequence()
+        self.route = default_demo_route()
+        self.items, self.summary = build_demo_sequence(self.route)
         self.current_index = 0
         self.playing = False
         self.last_event_frame = -1
@@ -509,6 +521,7 @@ class MainWindow(QMainWindow):
         self.signal_plot.reset()
         self.trajectory.reset()
         self.event_list.clear()
+        self.route_list.set_waypoints(self.route)
         self.rebuild_history_to_current()
 
     def _build_toolbar(self):
@@ -522,6 +535,10 @@ class MainWindow(QMainWindow):
         act_open = QAction("Open Map...", self)
         act_open.triggered.connect(self.open_map_placeholder)
         bar.addAction(act_open)
+
+        act_reset_route = QAction("Reset Route", self)
+        act_reset_route.triggered.connect(self.reset_route)
+        bar.addAction(act_reset_route)
 
     def _build_ui(self):
         central = QWidget()
@@ -572,10 +589,26 @@ class MainWindow(QMainWindow):
         self.summary_box = QTextEdit()
         self.summary_box.setReadOnly(True)
         self.event_list = EventListWidget()
+        self.route_list = RouteListWidget()
 
         traj_box = QGroupBox("Trajectory")
         traj_layout = QVBoxLayout(traj_box)
         traj_layout.addWidget(self.trajectory)
+
+        route_box = QGroupBox("Route")
+        route_layout = QVBoxLayout(route_box)
+        route_layout.addWidget(self.route_list)
+        route_buttons = QHBoxLayout()
+        self.btn_add_wp = QPushButton("Add WP")
+        self.btn_add_wp.clicked.connect(self.add_waypoint)
+        self.btn_pop_wp = QPushButton("Pop WP")
+        self.btn_pop_wp.clicked.connect(self.pop_waypoint)
+        self.btn_apply_route = QPushButton("Apply Route")
+        self.btn_apply_route.clicked.connect(self.apply_route)
+        route_buttons.addWidget(self.btn_add_wp)
+        route_buttons.addWidget(self.btn_pop_wp)
+        route_buttons.addWidget(self.btn_apply_route)
+        route_layout.addLayout(route_buttons)
 
         info_box = QGroupBox("Current Frame")
         info_layout = QVBoxLayout(info_box)
@@ -590,6 +623,7 @@ class MainWindow(QMainWindow):
         event_layout.addWidget(self.event_list)
 
         right_layout.addWidget(traj_box, 2)
+        right_layout.addWidget(route_box, 2)
         right_layout.addWidget(info_box, 2)
         right_layout.addWidget(summary_box, 1)
         right_layout.addWidget(event_box, 2)
@@ -622,8 +656,11 @@ class MainWindow(QMainWindow):
             self.timer.stop()
 
     def reload_demo(self):
-        self.items, self.summary = build_demo_sequence()
+        self.items, self.summary = build_demo_sequence(self.route)
         self.current_index = 0
+        self.playing = False
+        self.play_btn.setText("Play")
+        self.timer.stop()
         self.slider.blockSignals(True)
         self.slider.setMaximum(max(len(self.items) - 1, 0))
         self.slider.setValue(0)
@@ -632,7 +669,38 @@ class MainWindow(QMainWindow):
         self.trajectory.reset()
         self.event_list.clear()
         self.last_event_frame = -1
+        self.route_list.set_waypoints(self.route)
         self.rebuild_history_to_current()
+
+    def reset_route(self):
+        self.route = default_demo_route()
+        self.reload_demo()
+
+    def add_waypoint(self):
+        if not self.route:
+            self.route = default_demo_route()
+        last = self.route[-1]
+        idx = len(self.route)
+        step = 120.0
+        new_x = min(last.x + step, 1100.0)
+        new_y = last.y + (60.0 if idx % 2 == 0 else -60.0)
+        new_y = float(max(80.0, min(720.0, new_y)))
+        from simulator import Waypoint
+        self.route.append(Waypoint(new_x, new_y, f"wp_{idx}"))
+        self.route_list.set_waypoints(self.route)
+        self.statusBar().showMessage("Waypoint added. Click Apply Route to rebuild sequence.")
+
+    def pop_waypoint(self):
+        if len(self.route) > 2:
+            self.route.pop()
+            self.route_list.set_waypoints(self.route)
+            self.statusBar().showMessage("Last waypoint removed. Click Apply Route to rebuild sequence.")
+
+    def apply_route(self):
+        if len(self.route) < 2:
+            self.statusBar().showMessage("Need at least 2 waypoints")
+            return
+        self.reload_demo()
 
     def on_slider(self, value: int):
         self.current_index = int(value)
@@ -699,6 +767,7 @@ class MainWindow(QMainWindow):
                     f"heading_deg: {item.heading_deg:.2f}",
                     f"position: ({item.meta.position_x:.1f}, {item.meta.position_y:.1f})",
                     f"segment_name: {item.meta.segment_name}",
+                    f"route_waypoints: {len(self.route)}",
                     "",
                     f"boundaries_detected: {len(item.output.boundaries)}",
                     f"best_track_id: {None if best_track is None else best_track.track_id}",
