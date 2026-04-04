@@ -1,6 +1,7 @@
 """
 visualizer.py
-Десктопный визуализатор corridor-based spectral pipeline.
+Десктопный визуализатор corridor-based spectral pipeline
+в стиле старого rich desktop UI.
 """
 
 from __future__ import annotations
@@ -15,17 +16,25 @@ from typing import List
 import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
+    QAction,
     QApplication,
-    QGridLayout,
+    QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QSlider,
+    QSplitter,
+    QStatusBar,
     QTextEdit,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -36,122 +45,106 @@ from research_eval import build_synthetic_map
 from simulator import FlightSimulator, default_demo_route
 
 
-def np_to_pixmap(image_bgr: np.ndarray, target_width: int = 420) -> QPixmap:
+C = {
+    "bg": "#1a1d23",
+    "panel": "#22262e",
+    "widget": "#2a2f3a",
+    "border": "#353a47",
+    "text": "#e8eaf0",
+    "muted": "#7b8299",
+    "signal": "#4fc3f7",
+    "event": "#ef5350",
+    "track": "#7986cb",
+    "pos": "#e91e63",
+    "selected": "#ffd54f",
+    "candidate": "#cfd8dc",
+}
+
+STYLESHEET = f"""
+QMainWindow, QWidget {{
+    background: {C['bg']};
+    color: {C['text']};
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 11px;
+}}
+QGroupBox {{
+    color: {C['signal']};
+    border: 1px solid {C['border']};
+    border-radius: 6px;
+    margin-top: 8px;
+    padding-top: 6px;
+    font-size: 10px;
+    font-weight: bold;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+}}
+QPushButton {{
+    background: {C['widget']};
+    color: {C['text']};
+    border: 1px solid {C['border']};
+    border-radius: 4px;
+    padding: 5px 12px;
+}}
+QPushButton:hover {{ background: {C['signal']}; color: {C['bg']}; }}
+QSlider::groove:horizontal {{
+    background: {C['widget']};
+    height: 4px;
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {C['signal']};
+    width: 12px; height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+}}
+QSlider::sub-page:horizontal {{ background: {C['signal']}; border-radius: 2px; }}
+QListWidget, QTextEdit {{
+    background: {C['widget']};
+    border: 1px solid {C['border']};
+    border-radius: 4px;
+}}
+QStatusBar {{
+    background: {C['panel']};
+    border-top: 1px solid {C['border']};
+    color: {C['muted']};
+    font-size: 10px;
+}}
+QToolBar {{
+    background: {C['panel']};
+    border-bottom: 1px solid {C['border']};
+    spacing: 4px;
+    padding: 3px;
+}}
+QToolBar QToolButton {{
+    background: transparent;
+    color: {C['text']};
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 4px 8px;
+}}
+QToolBar QToolButton:hover {{ background: {C['widget']}; border-color: {C['border']}; }}
+QSplitter::handle {{ background: {C['border']}; }}
+"""
+
+
+def np_to_qimage(image_bgr: np.ndarray) -> QImage:
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     h, w = rgb.shape[:2]
-    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
-    pix = QPixmap.fromImage(qimg)
-    return pix.scaledToWidth(target_width, Qt.SmoothTransformation)
+    return QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
 
 
 def colorize_segments(segment_image: np.ndarray) -> np.ndarray:
     palette = np.array(
-        [
-            [50, 180, 255],
-            [80, 220, 120],
-            [240, 180, 60],
-            [180, 90, 255],
-            [255, 110, 110],
-        ],
+        [[50, 180, 255], [80, 220, 120], [240, 180, 60], [180, 90, 255], [255, 110, 110]],
         dtype=np.uint8,
     )
-    color = np.zeros((*segment_image.shape, 3), dtype=np.uint8)
+    out = np.zeros((*segment_image.shape, 3), dtype=np.uint8)
     for idx in np.unique(segment_image):
-        color[segment_image == idx] = palette[idx % len(palette)]
-    return color
-
-
-def draw_corridor_overlay(full_bgr: np.ndarray, corridor_bgr: np.ndarray) -> np.ndarray:
-    img = full_bgr.copy()
-    h, w = img.shape[:2]
-    ch, cw = corridor_bgr.shape[:2]
-
-    x0 = (w - cw) // 2
-    x1 = x0 + cw
-    y0 = int(round(h * 0.05))
-    y1 = y0 + ch
-
-    cv2.rectangle(img, (x0, y0), (x1, y1), (80, 220, 255), 2)
-    cv2.line(img, ((x0 + x1) // 2, y0), ((x0 + x1) // 2, y1), (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(
-        img,
-        "corridor ROI",
-        (x0 + 8, max(18, y0 - 8)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (80, 220, 255),
-        1,
-        cv2.LINE_AA,
-    )
-    return img
-
-
-def draw_boundaries(base_bgr: np.ndarray, output, highlight_best: bool = True) -> np.ndarray:
-    img = base_bgr.copy()
-    best_track_id = None if output.best_track is None else output.best_track.track_id
-
-    for idx, boundary in enumerate(output.boundaries):
-        is_selected = highlight_best and idx == 0 and output.measurement is not None
-        pts = boundary.points.astype(np.int32)
-        if len(pts) > 1:
-            for i in range(len(pts) - 1):
-                p0 = tuple(pts[i])
-                p1 = tuple(pts[i + 1])
-                color = (220, 220, 220) if not is_selected else (0, 255, 255)
-                thickness = 1 if not is_selected else 2
-                cv2.line(img, p0, p1, color, thickness, cv2.LINE_AA)
-        if boundary.geometry is not None:
-            px, py = boundary.geometry.point.astype(np.int32)
-            color = (0, 140, 255) if not is_selected else (0, 0, 255)
-            radius = 3 if not is_selected else 5
-            cv2.circle(img, (int(px), int(py)), radius, color, -1)
-
-    if output.measurement is not None:
-        px, py = output.measurement.geometry.point.astype(np.int32)
-        cv2.line(img, (0, int(py)), (img.shape[1] - 1, int(py)), (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.circle(img, (int(px), int(py)), 6, (255, 255, 255), 2)
-        cv2.putText(
-            img,
-            f"selected boundary | u={output.measurement.u_cross:.1f}, phi={np.degrees(output.measurement.phi_cross):.1f}",
-            (8, 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        if best_track_id is not None:
-            cv2.putText(
-                img,
-                f"track #{best_track_id}",
-                (8, 38),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-    return img
-
-
-def draw_selected_boundary_only(corridor_bgr: np.ndarray, output) -> np.ndarray:
-    img = corridor_bgr.copy()
-    img[:] = (20, 24, 32)
-    h, w = img.shape[:2]
-    cv2.line(img, (w // 2, 0), (w // 2, h - 1), (100, 100, 100), 1, cv2.LINE_AA)
-    cv2.line(img, (0, h // 2), (w - 1, h // 2), (100, 100, 100), 1, cv2.LINE_AA)
-
-    if output.measurement is not None:
-        px, py = output.measurement.geometry.point.astype(np.int32)
-        tangent = output.measurement.geometry.tangent.astype(np.float32)
-        p0 = (int(px - tangent[0] * 60), int(py - tangent[1] * 60))
-        p1 = (int(px + tangent[0] * 60), int(py + tangent[1] * 60))
-        cv2.line(img, p0, p1, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.circle(img, (int(px), int(py)), 6, (255, 255, 255), 2)
-        cv2.putText(img, "selected track geometry", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    else:
-        cv2.putText(img, "no confirmed measurement", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
-    return img
+        out[segment_image == idx] = palette[idx % len(palette)]
+    return out
 
 
 @dataclass
@@ -159,11 +152,8 @@ class SequenceItem:
     frame_number: int
     heading_deg: float
     full_bgr: np.ndarray
-    full_overlay_bgr: np.ndarray
     corridor_bgr: np.ndarray
     segments_bgr: np.ndarray
-    boundaries_bgr: np.ndarray
-    selected_bgr: np.ndarray
     output: object
     meta: object
 
@@ -185,76 +175,355 @@ def build_demo_sequence(max_frames: int = 160) -> tuple[List[SequenceItem], dict
             shake_pixels=1.5,
             output_format="hsv",
         )
-        pipeline = SpectralCorridorPipeline(
-            PipelineConfig(
-                cell_size=12,
-                n_clusters=3,
-            )
-        )
+        pipeline = SpectralCorridorPipeline(PipelineConfig(cell_size=12, n_clusters=3))
+        route = default_demo_route()
 
         items: List[SequenceItem] = []
-        route = default_demo_route()
         for hsv_frame, meta in sim.fly(route, speed_pix_per_frame=10.0):
             if meta.frame_number >= max_frames:
                 break
             heading_deg = float(np.degrees(meta.yaw))
-            output = pipeline.process_frame(
-                hsv_frame,
-                heading_deg=heading_deg,
-                frame_number=meta.frame_number,
-            )
-
+            output = pipeline.process_frame(hsv_frame, heading_deg=heading_deg, frame_number=meta.frame_number)
             full_bgr = cv2.cvtColor(hsv_frame, cv2.COLOR_HSV2BGR)
             aligned_bgr = rotate_frame_to_heading(full_bgr, heading_deg)
             corridor_bgr = cv2.cvtColor(output.corridor_frame, cv2.COLOR_HSV2BGR)
             segments_bgr = colorize_segments(output.spectral.segment_image)
-            boundaries_bgr = draw_boundaries(segments_bgr, output)
-            full_overlay_bgr = draw_corridor_overlay(aligned_bgr, corridor_bgr)
-            selected_bgr = draw_selected_boundary_only(corridor_bgr, output)
-
             items.append(
                 SequenceItem(
                     frame_number=meta.frame_number,
                     heading_deg=heading_deg,
                     full_bgr=aligned_bgr,
-                    full_overlay_bgr=full_overlay_bgr,
                     corridor_bgr=corridor_bgr,
                     segments_bgr=segments_bgr,
-                    boundaries_bgr=boundaries_bgr,
-                    selected_bgr=selected_bgr,
                     output=output,
                     meta=meta,
                 )
             )
-
         return items, pipeline.metrics.summary()
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
-class ImagePane(QLabel):
-    def __init__(self, title: str):
-        super().__init__()
+class FrameWidget(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(420, 300)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(320, 220)
-        self.setStyleSheet("background:#1b1f26; border:1px solid #394150;")
-        self._title = title
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setStyleSheet(f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;")
+        self._full_qimg: QImage | None = None
+        self._corridor_qimg: QImage | None = None
+        self._frame_number = 0
+        self._measurement = None
+        self._boundaries = []
+        self._heading_deg = 0.0
 
-    def set_image(self, image_bgr: np.ndarray):
-        self.setPixmap(np_to_pixmap(image_bgr))
+    def set_data(self, full_bgr: np.ndarray, corridor_bgr: np.ndarray, frame_number: int, heading_deg: float, boundaries, measurement):
+        self._full_qimg = np_to_qimage(full_bgr)
+        self._corridor_qimg = np_to_qimage(corridor_bgr)
+        self._frame_number = frame_number
+        self._heading_deg = heading_deg
+        self._boundaries = boundaries
+        self._measurement = measurement
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        painter.fillRect(0, 0, w, h, QColor(C["widget"]))
+
+        if self._full_qimg is None or self._corridor_qimg is None:
+            painter.setPen(QColor(C["muted"]))
+            painter.drawText(self.rect(), Qt.AlignCenter, "нет данных")
+            return
+
+        pix = QPixmap.fromImage(self._full_qimg)
+        scaled = pix.scaled(w - 4, h - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        ox = (w - scaled.width()) // 2
+        oy = (h - scaled.height()) // 2
+        painter.drawPixmap(ox, oy, scaled)
+
+        fw = self._full_qimg.width()
+        fh = self._full_qimg.height()
+        cw = self._corridor_qimg.width()
+        ch = self._corridor_qimg.height()
+
+        sx = scaled.width() / max(fw, 1)
+        sy = scaled.height() / max(fh, 1)
+
+        roi_x0 = int(ox + (fw - cw) * 0.5 * sx)
+        roi_x1 = int(ox + (fw + cw) * 0.5 * sx)
+        roi_y0 = int(oy + fh * 0.05 * sy)
+        roi_y1 = int(roi_y0 + ch * sy)
+
+        painter.setPen(QPen(QColor(C["signal"]), 2))
+        painter.drawRect(roi_x0, roi_y0, roi_x1 - roi_x0, roi_y1 - roi_y0)
+        painter.setPen(QPen(QColor("white"), 1))
+        painter.drawLine((roi_x0 + roi_x1) // 2, roi_y0, (roi_x0 + roi_x1) // 2, roi_y1)
+
+        painter.setPen(QColor(C["text"]))
+        painter.setFont(QFont("Consolas", 9))
+        painter.fillRect(ox + 6, oy + 6, 180, 18, QColor(0, 0, 0, 150))
+        painter.drawText(ox + 10, oy + 19, f"frame {self._frame_number:06d} | heading {self._heading_deg:.1f} deg")
+
+        if self._measurement is not None:
+            px = roi_x0 + int(self._measurement.geometry.point[0] / max(cw, 1) * (roi_x1 - roi_x0))
+            py = roi_y0 + int(self._measurement.geometry.point[1] / max(ch, 1) * (roi_y1 - roi_y0))
+            painter.setPen(QPen(QColor(C["selected"]), 2))
+            painter.drawEllipse(px - 6, py - 6, 12, 12)
+            painter.drawLine(roi_x0, py, roi_x1, py)
+
+
+class CorridorWidget(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(300, 220)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;")
+        self._base_qimg: QImage | None = None
+        self._boundaries = []
+        self._measurement = None
+
+    def set_data(self, corridor_bgr: np.ndarray, boundaries, measurement):
+        self._base_qimg = np_to_qimage(corridor_bgr)
+        self._boundaries = boundaries
+        self._measurement = measurement
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        painter.fillRect(0, 0, w, h, QColor(C["widget"]))
+        if self._base_qimg is None:
+            painter.setPen(QColor(C["muted"]))
+            painter.drawText(self.rect(), Qt.AlignCenter, "нет данных")
+            return
+
+        pix = QPixmap.fromImage(self._base_qimg)
+        scaled = pix.scaled(w - 4, h - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        ox = (w - scaled.width()) // 2
+        oy = (h - scaled.height()) // 2
+        painter.drawPixmap(ox, oy, scaled)
+
+        cw = self._base_qimg.width()
+        ch = self._base_qimg.height()
+        sx = scaled.width() / max(cw, 1)
+        sy = scaled.height() / max(ch, 1)
+        painter.setPen(QPen(QColor("white"), 1))
+        painter.drawLine(ox + scaled.width() // 2, oy, ox + scaled.width() // 2, oy + scaled.height())
+
+        for idx, boundary in enumerate(self._boundaries):
+            pts = boundary.points.astype(np.float32)
+            if len(pts) < 2:
+                continue
+            color = QColor(C["candidate"]) if idx != 0 or self._measurement is None else QColor(C["selected"])
+            pen = QPen(color, 1 if color != QColor(C["selected"]) else 2)
+            painter.setPen(pen)
+            for i in range(len(pts) - 1):
+                p0x = ox + int(pts[i, 0] * sx)
+                p0y = oy + int(pts[i, 1] * sy)
+                p1x = ox + int(pts[i + 1, 0] * sx)
+                p1y = oy + int(pts[i + 1, 1] * sy)
+                painter.drawLine(p0x, p0y, p1x, p1y)
+
+        if self._measurement is not None:
+            px = ox + int(self._measurement.geometry.point[0] * sx)
+            py = oy + int(self._measurement.geometry.point[1] * sy)
+            painter.setPen(QPen(QColor("white"), 2))
+            painter.drawEllipse(px - 5, py - 5, 10, 10)
+
+
+class SignalPlot(QWidget):
+    MAX_HISTORY = 240
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(420, 140)
+        self.setStyleSheet(f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;")
+        self._conf: List[float] = []
+        self._n_boundaries: List[float] = []
+        self._u_cross: List[float] = []
+
+    def reset(self):
+        self._conf.clear()
+        self._n_boundaries.clear()
+        self._u_cross.clear()
+        self.update()
+
+    def add_point(self, n_boundaries: int, confidence: float | None, u_cross: float | None):
+        self._n_boundaries.append(float(min(n_boundaries, 10)) / 10.0)
+        self._conf.append(0.0 if confidence is None else float(np.clip(confidence, 0.0, 1.0)))
+        self._u_cross.append(0.0 if u_cross is None else float(min(max(u_cross / 100.0, 0.0), 1.0)))
+        if len(self._conf) > self.MAX_HISTORY:
+            excess = len(self._conf) - self.MAX_HISTORY
+            self._conf = self._conf[excess:]
+            self._n_boundaries = self._n_boundaries[excess:]
+            self._u_cross = self._u_cross[excess:]
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        painter.fillRect(0, 0, w, h, QColor(C["widget"]))
+        n = len(self._conf)
+        if n < 2:
+            painter.setPen(QColor(C["muted"]))
+            painter.drawText(self.rect(), Qt.AlignCenter, "нет истории")
+            return
+
+        pad = (30, 8, 8, 18)
+        pw = w - pad[0] - pad[2]
+        ph = h - pad[1] - pad[3]
+
+        def to_px(i, val):
+            x = pad[0] + int(i / max(self.MAX_HISTORY - 1, 1) * pw)
+            y = pad[1] + int((1.0 - val) * ph)
+            return x, y
+
+        for frac in [0.25, 0.5, 0.75, 1.0]:
+            yg = pad[1] + int((1.0 - frac) * ph)
+            painter.setPen(QPen(QColor(C["border"]), 1))
+            painter.drawLine(pad[0], yg, w - pad[2], yg)
+
+        curves = [
+            (self._conf, QColor(C["selected"]), "conf"),
+            (self._n_boundaries, QColor(C["signal"]), "N boundaries"),
+            (self._u_cross, QColor(C["track"]), "u/100"),
+        ]
+        for values, color, _ in curves:
+            painter.setPen(QPen(color, 2))
+            pts = [to_px(i, values[i]) for i in range(len(values))]
+            for i in range(len(pts) - 1):
+                painter.drawLine(*pts[i], *pts[i + 1])
+
+        painter.setFont(QFont("Consolas", 8))
+        lx = pad[0]
+        for _, color, label in curves:
+            painter.setPen(color)
+            painter.drawText(lx, h - 3, label)
+            lx += len(label) * 7 + 16
+
+
+class TrajectoryWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(240, 180)
+        self.setStyleSheet(f"background:{C['widget']}; border:1px solid {C['border']}; border-radius:4px;")
+        self._positions: List[tuple[float, float]] = []
+        self._events: List[int] = []
+        self._map_w = 1200
+        self._map_h = 800
+
+    def reset(self):
+        self._positions.clear()
+        self._events.clear()
+        self.update()
+
+    def add_position(self, x: float, y: float, is_event: bool):
+        self._positions.append((x, y))
+        if is_event:
+            self._events.append(len(self._positions) - 1)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        pad = (8, 18, 8, 8)
+        pw = w - pad[0] - pad[2]
+        ph = h - pad[1] - pad[3]
+        painter.fillRect(0, 0, w, h, QColor(C["widget"]))
+        painter.setPen(QColor(C["muted"]))
+        painter.setFont(QFont("Consolas", 8))
+        painter.drawText(8, 12, "trajectory")
+
+        if len(self._positions) < 2:
+            painter.drawText(self.rect(), Qt.AlignCenter, "нет данных")
+            return
+
+        def to_screen(mx, my):
+            sx = pad[0] + int(mx / max(self._map_w, 1) * pw)
+            sy = pad[1] + int(my / max(self._map_h, 1) * ph)
+            return sx, sy
+
+        painter.setPen(QPen(QColor(C["track"]), 1.5))
+        for i in range(len(self._positions) - 1):
+            x0, y0 = to_screen(*self._positions[i])
+            x1, y1 = to_screen(*self._positions[i + 1])
+            painter.drawLine(x0, y0, x1, y1)
+
+        painter.setPen(QPen(QColor("white"), 1.5))
+        painter.setBrush(QColor(C["pos"]))
+        cx, cy = to_screen(*self._positions[-1])
+        painter.drawEllipse(cx - 5, cy - 5, 10, 10)
+
+        painter.setPen(QPen(QColor(C["event"]), 1.5))
+        painter.setBrush(QColor(C["event"]))
+        for idx in self._events:
+            ex, ey = to_screen(*self._positions[idx])
+            painter.drawEllipse(ex - 4, ey - 4, 8, 8)
+
+
+class EventListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFont(QFont("Consolas", 9))
+
+    def add_measurement(self, frame_number: int, track_id: int | None, confidence: float | None, phi_deg: float | None):
+        text = (
+            f"frame {frame_number:5d}  "
+            f"track={track_id if track_id is not None else '-'}  "
+            f"conf={0.0 if confidence is None else confidence:.2f}  "
+            f"phi={0.0 if phi_deg is None else phi_deg:.1f}"
+        )
+        item = QListWidgetItem(text)
+        item.setForeground(QColor(C["selected"]))
+        self.addItem(item)
+        self.scrollToBottom()
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Spectral Corridor Visualizer")
-        self.resize(1400, 920)
+        self.resize(1560, 980)
+        self.setStyleSheet(STYLESHEET)
 
         self.items, self.summary = build_demo_sequence()
         self.current_index = 0
         self.playing = False
+        self.last_event_frame = -1
 
+        self._build_toolbar()
+        self._build_ui()
+        self._build_statusbar()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.next_frame)
+        self.timer.setInterval(120)
+
+        self.signal_plot.reset()
+        self.trajectory.reset()
+        self.event_list.clear()
+        self.rebuild_history_to_current()
+
+    def _build_toolbar(self):
+        bar = QToolBar("Main", self)
+        self.addToolBar(bar)
+
+        act_reload = QAction("Reload Demo", self)
+        act_reload.triggered.connect(self.reload_demo)
+        bar.addAction(act_reload)
+
+        act_open = QAction("Open Map...", self)
+        act_open.triggered.connect(self.open_map_placeholder)
+        bar.addAction(act_open)
+
+    def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -262,57 +531,87 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.play_btn = QPushButton("Play")
         self.play_btn.clicked.connect(self.toggle_play)
-        self.reload_btn = QPushButton("Reload Demo")
-        self.reload_btn.clicked.connect(self.reload_demo)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
         self.slider.setMaximum(max(len(self.items) - 1, 0))
         self.slider.valueChanged.connect(self.on_slider)
         controls.addWidget(self.play_btn)
-        controls.addWidget(self.reload_btn)
         controls.addWidget(self.slider)
         root.addLayout(controls)
 
-        grid = QGridLayout()
-        self.frame_pane = ImagePane("Aligned Frame + Corridor")
-        self.corridor_pane = ImagePane("Corridor")
-        self.segment_pane = ImagePane("Segments")
-        self.boundary_pane = ImagePane("Boundaries")
-        self.selected_pane = ImagePane("Selected Boundary")
-        grid.addWidget(self._wrap("Aligned Frame + Corridor", self.frame_pane), 0, 0)
-        grid.addWidget(self._wrap("Corridor", self.corridor_pane), 0, 1)
-        grid.addWidget(self._wrap("Spectral Segments", self.segment_pane), 1, 0)
-        grid.addWidget(self._wrap("Boundaries / Measurement", self.boundary_pane), 1, 1)
-        grid.addWidget(self._wrap("Selected Boundary Geometry", self.selected_pane), 2, 0, 1, 2)
-        root.addLayout(grid, stretch=1)
+        splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(splitter, 1)
 
-        bottom = QHBoxLayout()
-        self.info = QTextEdit()
-        self.info.setReadOnly(True)
-        self.info.setStyleSheet("background:#11151c; color:#e6edf3; border:1px solid #394150;")
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        self.frame_widget = FrameWidget()
+        self.corridor_widget = CorridorWidget()
+        self.signal_plot = SignalPlot()
+
+        frame_box = QGroupBox("Frame")
+        frame_layout = QVBoxLayout(frame_box)
+        frame_layout.addWidget(self.frame_widget)
+
+        corridor_box = QGroupBox("Corridor / Boundaries")
+        corridor_layout = QVBoxLayout(corridor_box)
+        corridor_layout.addWidget(self.corridor_widget)
+
+        plot_box = QGroupBox("Signal History")
+        plot_layout = QVBoxLayout(plot_box)
+        plot_layout.addWidget(self.signal_plot)
+
+        left_layout.addWidget(frame_box, 3)
+        left_layout.addWidget(corridor_box, 2)
+        left_layout.addWidget(plot_box, 1)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        self.trajectory = TrajectoryWidget()
+        self.info_box = QTextEdit()
+        self.info_box.setReadOnly(True)
         self.summary_box = QTextEdit()
         self.summary_box.setReadOnly(True)
-        self.summary_box.setStyleSheet("background:#11151c; color:#e6edf3; border:1px solid #394150;")
-        self.legend_box = QTextEdit()
-        self.legend_box.setReadOnly(True)
-        self.legend_box.setStyleSheet("background:#11151c; color:#e6edf3; border:1px solid #394150;")
-        bottom.addWidget(self._wrap("Current Frame", self.info), 1)
-        bottom.addWidget(self._wrap("Metrics Summary", self.summary_box), 1)
-        bottom.addWidget(self._wrap("Legend", self.legend_box), 1)
-        root.addLayout(bottom)
+        self.event_list = EventListWidget()
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.next_frame)
-        self.timer.setInterval(120)
+        traj_box = QGroupBox("Trajectory")
+        traj_layout = QVBoxLayout(traj_box)
+        traj_layout.addWidget(self.trajectory)
 
-        self.update_view()
+        info_box = QGroupBox("Current Frame")
+        info_layout = QVBoxLayout(info_box)
+        info_layout.addWidget(self.info_box)
 
-    def _wrap(self, title: str, widget: QWidget) -> QGroupBox:
-        box = QGroupBox(title)
-        box.setFont(QFont("Consolas", 10))
-        layout = QVBoxLayout(box)
-        layout.addWidget(widget)
-        return box
+        summary_box = QGroupBox("Metrics")
+        summary_layout = QVBoxLayout(summary_box)
+        summary_layout.addWidget(self.summary_box)
+
+        event_box = QGroupBox("Measurements")
+        event_layout = QVBoxLayout(event_box)
+        event_layout.addWidget(self.event_list)
+
+        right_layout.addWidget(traj_box, 2)
+        right_layout.addWidget(info_box, 2)
+        right_layout.addWidget(summary_box, 1)
+        right_layout.addWidget(event_box, 2)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([1040, 420])
+
+        legend = QLabel(
+            "Legend: blue box = corridor ROI, white line = corridor center, "
+            "gray = all candidates, yellow = selected boundary, white circle = crossing point"
+        )
+        legend.setStyleSheet(f"color:{C['muted']};")
+        root.addWidget(legend)
+
+    def _build_statusbar(self):
+        status = QStatusBar(self)
+        self.setStatusBar(status)
+        status.showMessage("Ready")
+
+    def open_map_placeholder(self):
+        QFileDialog.getOpenFileName(self, "Open map", "", "Images (*.png *.jpg *.jpeg)")
 
     def toggle_play(self):
         self.playing = not self.playing
@@ -329,11 +628,15 @@ class MainWindow(QMainWindow):
         self.slider.setMaximum(max(len(self.items) - 1, 0))
         self.slider.setValue(0)
         self.slider.blockSignals(False)
-        self.update_view()
+        self.signal_plot.reset()
+        self.trajectory.reset()
+        self.event_list.clear()
+        self.last_event_frame = -1
+        self.rebuild_history_to_current()
 
     def on_slider(self, value: int):
         self.current_index = int(value)
-        self.update_view()
+        self.rebuild_history_to_current()
 
     def next_frame(self):
         if not self.items:
@@ -342,64 +645,82 @@ class MainWindow(QMainWindow):
         self.slider.blockSignals(True)
         self.slider.setValue(self.current_index)
         self.slider.blockSignals(False)
+        self.rebuild_history_to_current()
+
+    def rebuild_history_to_current(self):
+        self.signal_plot.reset()
+        self.trajectory.reset()
+        self.event_list.clear()
+        self.last_event_frame = -1
+        for idx in range(self.current_index + 1):
+            item = self.items[idx]
+            measurement = item.output.measurement
+            best_track = item.output.best_track
+            self.signal_plot.add_point(
+                n_boundaries=len(item.output.boundaries),
+                confidence=None if measurement is None else measurement.confidence,
+                u_cross=None if measurement is None else measurement.u_cross,
+            )
+            self.trajectory.add_position(item.meta.position_x, item.meta.position_y, measurement is not None)
+            if measurement is not None and item.frame_number != self.last_event_frame:
+                self.event_list.add_measurement(
+                    frame_number=item.frame_number,
+                    track_id=None if best_track is None else best_track.track_id,
+                    confidence=measurement.confidence,
+                    phi_deg=float(np.degrees(measurement.phi_cross)),
+                )
+                self.last_event_frame = item.frame_number
         self.update_view()
 
     def update_view(self):
         if not self.items:
             return
         item = self.items[self.current_index]
-        self.frame_pane.set_image(item.full_overlay_bgr)
-        self.corridor_pane.set_image(item.corridor_bgr)
-        self.segment_pane.set_image(item.segments_bgr)
-        self.boundary_pane.set_image(item.boundaries_bgr)
-        self.selected_pane.set_image(item.selected_bgr)
+        self.frame_widget.set_data(
+            item.full_bgr,
+            item.corridor_bgr,
+            frame_number=item.frame_number,
+            heading_deg=item.heading_deg,
+            boundaries=item.output.boundaries,
+            measurement=item.output.measurement,
+        )
+        self.corridor_widget.set_data(
+            item.corridor_bgr,
+            boundaries=item.output.boundaries,
+            measurement=item.output.measurement,
+        )
 
         measurement = item.output.measurement
         best_track = item.output.best_track
-        self.info.setPlainText(
+        self.info_box.setPlainText(
             "\n".join(
                 [
                     f"frame: {item.frame_number}",
                     f"heading_deg: {item.heading_deg:.2f}",
                     f"position: ({item.meta.position_x:.1f}, {item.meta.position_y:.1f})",
-                    f"boundaries detected: {len(item.output.boundaries)}",
-                    f"best_track: {None if best_track is None else best_track.track_id}",
+                    f"segment_name: {item.meta.segment_name}",
+                    "",
+                    f"boundaries_detected: {len(item.output.boundaries)}",
+                    f"best_track_id: {None if best_track is None else best_track.track_id}",
                     f"track_hits: {0 if best_track is None else best_track.hits}",
-                    f"measurement_u: {None if measurement is None else round(measurement.u_cross, 2)} px",
+                    f"track_age: {0 if best_track is None else best_track.age}",
+                    "",
+                    f"measurement_u: {None if measurement is None else round(measurement.u_cross, 2)}",
                     f"measurement_phi_deg: {None if measurement is None else round(np.degrees(measurement.phi_cross), 2)}",
                     f"measurement_conf: {None if measurement is None else round(measurement.confidence, 3)}",
-                    "",
-                    "How to read the panes:",
-                    "1. Top-left: full aligned frame with corridor ROI box.",
-                    "2. Top-right: only the corridor crop used by the algorithm.",
-                    "3. Middle-left: spectral segmentation of that corridor.",
-                    "4. Middle-right: all detected boundaries, selected one is bright yellow.",
-                    "5. Bottom image: only the chosen boundary geometry and crossing point.",
                 ]
             )
         )
-
-        self.summary_box.setPlainText(
-            "\n".join(f"{key}: {value:.4f}" for key, value in self.summary.items())
-        )
-        self.legend_box.setPlainText(
-            "\n".join(
-                [
-                    "White vertical line in full frame: center of corridor.",
-                    "Blue rectangle: corridor ROI passed to the algorithm.",
-                    "Segment colors: spectral clusters inside corridor.",
-                    "Gray boundaries: raw boundary candidates.",
-                    "Yellow boundary: selected candidate used for tracking/measurement.",
-                    "Red/white circle: crossing point on the selected boundary.",
-                    "Bottom pane shows only the chosen geometry, without segment clutter.",
-                ]
-            )
+        self.summary_box.setPlainText("\n".join(f"{key}: {value:.4f}" for key, value in self.summary.items()))
+        self.statusBar().showMessage(
+            f"frame={item.frame_number} | boundaries={len(item.output.boundaries)} | "
+            f"track={None if best_track is None else best_track.track_id}"
         )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualizer for spectral corridor pipeline")
-    parser.add_argument("--demo", action="store_true", help="Kept for compatibility; demo is default")
+    parser.add_argument("--demo", action="store_true", help="demo mode")
     return parser.parse_args()
 
 
